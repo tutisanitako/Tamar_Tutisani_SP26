@@ -24,7 +24,8 @@ Show all animation movies released during this period with rate more than 1, sor
 ----------------------------------------
 --solution 1: JOINs only
 ----------------------------------------
-/*INNER JOIN film_category - keeps only films that have at least one
+/*
+INNER JOIN film_category - keeps only films that have at least one
 category row assigned; uncategorised films are excluded.
 INNER JOIN category - restricts to 'Animation' rows only.
 
@@ -34,8 +35,10 @@ Advantages:
 	   of existing indexes on foreign key columns.
 
 Disadvantages:
-	1. Slightly less modular than a CTE when the Animation filter is needed
-	   in multiple places of the same query.*/
+	1. All filtering is done in a single block, adding a second genre filter
+	   (e.g. also include Comedy) would require extending the WHERE clause or
+	   restructuring the query, whereas a CTE would let you reuse the base set.
+*/
 
 SELECT f.title
 FROM public.film f
@@ -50,7 +53,8 @@ ORDER BY f.title;
 ----------------------------------------
 -- solution 2: CTE
 ----------------------------------------
-/*Advantages:
+/*
+Advantages:
 	1. Separates "which films are Animation" from the date/rate filter.
 	   each step is independently testable and easy to extend.
 Disadvantages:
@@ -58,7 +62,8 @@ Disadvantages:
 	2. Potentially Slower: The database has to "save" the first part 
 	   of the query into its memory before finishing the second part.
 	3. Poor Readability: Separating the filters into different blocks forces 
-	   the reader to jump back and forth to understand how the final result is produced.*/
+	   the reader to jump back and forth to understand how the final result is produced.
+*/
 
 WITH animated_films AS (
 	SELECT 
@@ -80,12 +85,15 @@ ORDER BY af.title;
 ----------------------------------------
 -- solution 3: Subquery
 ----------------------------------------
-/* Advantages:
+/*
+Advantages:
    1. IN subquery clearly expresses "films whose ID exists
    in the Animation set".
  Disadvantages:
    1. IN with a large subquery result-set can be slower than an INNER JOIN
-   2. Harder to debug or extend than a CTE.*/
+      because the optimiser may evaluate the subquery for each outer row.
+   2. Harder to debug or extend than a CTE.
+*/
 
 SELECT f.title
 FROM public.film f
@@ -119,6 +127,11 @@ Assumptions
 	   or blank it is omitted to produce a clean display value.
 	5. Querying the parent public.payment table automatically covers all
 	   monthly partitions.
+	6. GROUP BY includes s.store_id because store_id is the unique identifier
+	   of the store entity. A store could theoretically change its address over
+	   time, so grouping by address columns alone would incorrectly merge
+	   distinct stores that share an address, or split one store across rows
+	   if its address changed. Grouping by the ID guarantees one row per store.
 
 Production choice: solution 1
 */
@@ -145,7 +158,8 @@ INNER JOIN public.inventory i ON r.inventory_id = i.inventory_id
 INNER JOIN public.store s ON i.store_id = s.store_id 
 INNER JOIN public.address ad ON s.address_id = ad.address_id 
 WHERE p.payment_date >= '2017-04-01'
-GROUP BY ad.address,
+GROUP BY s.store_id,
+		 ad.address,
 		 ad.address2
 ORDER BY revenue DESC;
 
@@ -219,8 +233,12 @@ by number of movies (released since 2015) they took part in
 (columns: first_name, last_name, number_of_movies, sorted by number_of_movies in descending order)
 
 Assumptions:
-"released since 2015" -> release_year >= 2015 (greater than or equal to).
-Actors with no qualifying films are excluded (INNER JOIN is intentional).
+	1. "released since 2015" -> release_year >= 2015 (greater than or equal to).
+	2. Actors with no qualifying films are excluded (INNER JOIN is intentional).
+	3. The task says "top-5" but the dataset contains multiple actors tied at
+	   the same film count for the 5th position. Since the task does not specify
+	   how to handle ties, LIMIT 5 is applied with a secondary alphabetical sort
+	   (first_name, last_name) to make the selection deterministic.
 
 how i saw business logic:
 actor -> film_actor(film_id, actor_id) -> film(film_id)
@@ -252,7 +270,9 @@ WHERE f.release_year >= 2015
 GROUP BY a.actor_id,
 		 a.first_name,
 		 a.last_name 
-ORDER BY number_of_movies DESC
+ORDER BY number_of_movies DESC,
+		 a.first_name ASC,
+		 a.last_name ASC
 LIMIT 5;
 
 
@@ -282,7 +302,9 @@ SELECT ams.first_name,
 	   ams.last_name,
 	   ams.number_of_movies
 FROM actor_movies_since2015 ams
-ORDER BY ams.number_of_movies DESC
+ORDER BY ams.number_of_movies DESC,
+		 ams.first_name ASC,
+		 ams.last_name ASC
 LIMIT 5;
 
 
@@ -291,12 +313,12 @@ LIMIT 5;
 ----------------------------------------
 /*
 Advantages:
-	1. It keeps the "Counting Logic" (the GROUP BY and JOINs) physically inside a "box."
-	   This makes the outer part of the query very clean, as it only has to worry about
-	   the final ORDER BY and LIMIT.
+	1. It keeps the counting logic (the GROUP BY and JOINs) inside a derived
+	   table, keeping the outer SELECT clean: it only handles ORDER BY and LIMIT.
 Disadvantages:
-	1. Every time the query runs, it has to rebuild that 'inner table' from zero.
-	   It can't easily reuse the data.
+	1. If the same intermediate result is needed in multiple places within
+	   the query, a derived table cannot be reused, a CTE would be required.
+	2. The inner query cannot be executed or tested independently.
 */
 
 SELECT movie_since2015.first_name,
@@ -314,7 +336,9 @@ FROM (
 	  		   ac.first_name,
 	  		   ac.last_name 
 ) AS movie_since2015
-ORDER BY number_of_movies DESC
+ORDER BY number_of_movies DESC,
+		 first_name ASC,
+		 last_name ASC
 LIMIT 5;
 
 
@@ -376,7 +400,7 @@ ORDER BY f.release_year DESC;
 ----------------------------------------
 /*
 Advantages:
-	2. Genre-filter step is isolated and independently testable. easy to add
+	1. Genre-filter step is isolated and independently testable. easy to add
 	   more genres to the CTE without touching the pivot logic.
 Disadvantages:
 	1. Extra materialisation step.
@@ -522,11 +546,11 @@ LIMIT 3;
 ----------------------------------------
 /*
 Advantages:
-	No CTE dependency.
+	1. No CTE dependency.
 Disadvantages:
-	The MAX subquery recalculates for each outer row, can be expensive
-	on large payment tables without a covering index on (staff_id, payment_date).
-	Harder to read and test in isolation compared to the CTE version.
+	1. The MAX subquery recalculates for each outer row, can be expensive
+	   on large payment tables without a covering index on (staff_id, payment_date).
+	2. Harder to read and test in isolation compared to the CTE version.
 Additional comment on JOIN condition:
 	pay_agg.max_payment_date = last_pay.payment_date is a non-FK join condition.
 	This is a necessary exception, we need to match the pre-aggregated max date
@@ -703,7 +727,7 @@ LIMIT 5;
 
 /*
 Task 3 - V1
-The stores’ marketing team wants to analyze actors' inactivity periods to select those 
+The stores' marketing team wants to analyze actors' inactivity periods to select those 
 with notable career breaks for targeted promotional campaigns, highlighting their comebacks or 
 consistent appearances to engage customers with nostalgic or reliable film stars.
 V1: gap between the latest release_year and current year per each actor;
@@ -715,6 +739,10 @@ Assumptions:
 	1. Gap = EXTRACT(YEAR FROM CURRENT_DATE) - MAX(release_year) per actor.
 	2. Actors with no film credits are excluded (INNER JOIN is intentional).
 	3. A larger gap means the actor has not appeared in a film for longer.
+	4. "didn't act for a longer period than others" is interpreted as the
+	   top 5 actors with the longest inactivity gap. The task does not specify
+	   a cutoff, so TOP 5 was chosen as a reasonable default for a promotional
+	   campaign use-case.
  
 Production choice: solution 1
 */
@@ -743,7 +771,8 @@ INNER JOIN public.film f ON fa.film_id = f.film_id
 GROUP BY a.actor_id,
 		 a.first_name,
 		 a.last_name
-ORDER BY years_inactive DESC;
+ORDER BY years_inactive DESC
+LIMIT 5;
  
  
 ----------------------------------------
@@ -774,7 +803,8 @@ SELECT aly.first_name,
 	   aly.latest_release_year,
 	   EXTRACT(YEAR FROM CURRENT_DATE)::INT - aly.latest_release_year AS years_inactive
 FROM actor_last_year aly
-ORDER BY years_inactive DESC;
+ORDER BY years_inactive DESC
+LIMIT 5;
  
  
 ----------------------------------------
@@ -804,7 +834,8 @@ FROM (
 			 a.first_name,
 			 a.last_name
 ) AS actors_year
-ORDER BY years_inactive DESC;
+ORDER BY years_inactive DESC
+LIMIT 5;
  
  
  
@@ -831,6 +862,10 @@ Assumptions:
 	3. NOTE: the standard dvdrental dataset has release_year = 2006 for all
 	   films, so no consecutive pairs exist and all queries return 0 rows.
 	   The logic is correct for real multi-year data.
+	4. "didn't act for a longer period than others" is interpreted as the
+	   top 5 actors by maximum gap between any two consecutive appearances.
+	   Same reasoning as V1: top 5 is a sensible default for a promotional
+	   campaign; the threshold should be confirmed with the stakeholder.
  
 Production choice: solution 2
 */
@@ -900,7 +935,8 @@ INNER JOIN consec_gaps cg ON a.actor_id = cg.actor_id
 GROUP BY a.actor_id,
 		 a.first_name,
 		 a.last_name
-ORDER BY max_gap_years DESC;
+ORDER BY max_gap_years DESC
+LIMIT 5;
  
  
 ----------------------------------------
@@ -946,4 +982,5 @@ INNER JOIN (
 GROUP BY a.actor_id,
 		 a.first_name,
 		 a.last_name
-ORDER BY max_gap_years DESC;
+ORDER BY max_gap_years DESC
+LIMIT 5;

@@ -1,0 +1,287 @@
+SQL DCL Homework: Task 1
+- Figure out what security precautions are already used in your 'dvd_rental' database.  
+  Prepare description
+------------------------------------------------------------------------
+
+  
+------------------------------------------------------------------------
+1. EXISTING USERS / ROLES AND THEIR PERMISSIONS
+------------------------------------------------------------------------
+
+Query used:
+
+SELECT
+	rolname,
+	rolsuper,
+	rolcreaterole,
+	rolcreatedb,
+	rolcanlogin,
+	rolconnlimit,
+	rolreplication
+FROM pg_catalog.pg_roles
+ORDER BY rolname;
+
+OUTPUT:
+
+	rolname                      | rolsuper | rolcreaterole | rolcreatedb | rolcanlogin | rolconnlimit | rolreplication
+	-----------------------------+----------+---------------+-------------+-------------+--------------+----------------
+	pg_checkpoint                | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_create_subscription       | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_database_owner            | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_execute_server_program    | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_maintain                  | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_monitor                   | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_read_all_data             | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_read_all_settings         | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_read_all_stats            | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_read_server_files         | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_signal_autovacuum_worker  | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_signal_backend            | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_stat_scan_tables          | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_use_reserved_connections  | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_write_all_data            | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	pg_write_server_files        | [ ]      | [ ]           | [ ]         | [ ]         | -1           | [ ]
+	postgres                     | [v]      | [v]           | [v]         | [v]         | -1           | [v]
+
+Findings:
+ - Only the built-in superuser "postgres" and a set of predefined system
+    group roles exist. There are no application-specific login roles at all.
+ - The "postgres" role is a full superuser with no connection limit, no
+   password expiry, and unrestricted replication privilege. This is the
+   single point of access for the entire database.
+ - None of the pg_* system roles have login enabled, they are group roles
+   meant to be granted to other roles, not used directly.
+
+
+------------------------------------------------------------------------
+2. TABLE-LEVEL PRIVILEGES
+------------------------------------------------------------------------
+
+Query used:
+
+SELECT
+	grantee,
+	table_schema,
+	table_name,
+	privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+ORDER BY table_name, grantee, privilege_type;
+
+Sample output (fresh restore):
+
+	grantee  | table_schema | table_name | privilege_type
+	---------+--------------+------------+----------------
+	postgres | public       | actor      | DELETE
+	postgres | public       | actor      | INSERT
+	postgres | public       | actor      | REFERENCES
+	postgres | public       | actor      | SELECT
+	postgres | public       | actor      | TRIGGER
+	postgres | public       | actor      | TRUNCATE
+	postgres | public       | actor      | UPDATE
+	postgres | public       | actor_info | DELETE
+	postgres | public       | actor_info | INSERT
+	postgres | public       | actor_info | REFERENCES
+	postgres | public       | actor_info | SELECT
+	(same pattern for all other tables...)
+
+Findings:
+ - Every table in the public schema grants ALL privileges exclusively to
+   "postgres". No other role has any table-level grant.
+ - The PUBLIC pseudo-role has not been granted any privilege on any TABLE.
+ - There are no column-level grants and no views with restricted SELECT.
+
+
+------------------------------------------------------------------------
+3. ROW-LEVEL SECURITY (RLS) POLICIES
+------------------------------------------------------------------------
+
+Query used:
+
+SELECT
+	schemaname,
+	tablename,
+	rowsecurity
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY tablename;
+
+SELECT
+	schemaname,
+	tablename,
+	policyname,
+	roles,
+	cmd,
+	qual
+FROM pg_policies
+WHERE schemaname = 'public';
+
+Sample output:
+
+	-- pg_tables result (from my understanding, rowsecurity = [ ] means false for every table):
+	schemaname | tablename     | rowsecurity
+	-----------+---------------+------------
+	public     | actor         | [ ]
+	public     | address       | [ ]
+	public     | category      | [ ]
+	public     | city          | [ ]
+	public     | country       | [ ]
+	public     | customer      | [ ]
+	public     | film          | [ ]
+	public     | film_actor    | [ ]
+	public     | film_category | [ ]
+	public     | inventory     | [ ]
+	(same for remaining tables...)
+
+	-- pg_policies result: zero rows returned (no policies defined anywhere)
+	schemaname | tablename | policyname | roles | cmd | qual
+	-----------+-----------+------------+-------+-----+-----
+	(0 rows)
+
+Findings:
+ - Row-level security is disabled on all TABLES. no policies have been
+   defined. Any role with SELECT on a table sees every single row.
+
+
+------------------------------------------------------------------------
+4. DATABASE-LEVEL SETTINGS
+------------------------------------------------------------------------
+
+Query used:
+
+SELECT
+	datname,
+	datconnlimit,
+	datacl
+FROM pg_database
+WHERE datname = 'dvdrental';
+
+Sample output:
+
+	datname   | datconnlimit | datacl
+	----------+--------------+--------
+	dvdrental | -1           | (null)
+
+
+Findings:
+ - There is no connection limit on the database (-1 = unlimited). a single 
+   role could exhaust max_connections on the server.
+ - The datacl column is NULL, meaning no explicit CONNECT/TEMP grant has
+   been applied. PUBLIC has the default CONNECT and TEMPORARY privileges
+   inherited from the database creation.
+
+
+------------------------------------------------------------------------
+5. SUFFICIENCY ASSESSMENT
+------------------------------------------------------------------------
+
+Current state: RISKY
+
+Reasons:
+1) Single superuser entry point — the only usable role is "postgres"
+   (superuser). All application access, backups share this one set of 
+   credentials. A leaked password gives an attacker complete CONTROL
+   over the database cluster.
+
+2) No application roles exist, there is no separation between a
+   read-only reporting role, a read-write application role, and an
+   administrative role. The principle of least privilege is not applied
+   anywhere.
+
+3) No row-level security, all users who can SELECT on "payment",
+   "rental", or "customer" see every customers data. There is no
+   per-customer isolation at the data layer.
+
+4) No connection limits, there is nothing to prevent a misconfigured
+   application or a denial-of-service attempt from opening thousands of
+   connections and exhausting max_connections on the server, which would
+   make the database unreachable for all other clients.
+
+5) Weak password hashing in the staff table. The "staff" table has a
+   "password" column of type text. Running the query below shows that
+   passwords are stored as SHA-1 hashes:
+
+SELECT
+	staff_id,
+	username,
+	password
+FROM public.staff;
+
+Output:
+	staff_id | username | password
+	---------+----------+------------------------------------------
+	1        | Mike     | 8cb2237d0679ca88db6464eac60da96345513964
+	2        | Jon      | 8cb2237d0679ca88db6464eac60da96345513964
+	3        | Peter    | 8cb2237d0679ca88db6464eac60da96345513964
+	4        | HannaR   | 8cb2237d0679ca88db6464eac60da96345513964
+	5        | HannaC   | 8cb2237d0679ca88db6464eac60da96345513964
+
+   The hash is 40 hex characters, which is the output length of SHA-1.
+
+   SHA-1 is considered cryptographically broken for password storage.
+   It is fast to compute, has no salt, and is vulnerable to rainbow
+   table attacks. Worse, 8cb2237d0679ca88db6464eac60da96345513964 is
+   the publicly known SHA-1 hash of the string "1", meaning every staff
+   member's password is literally the number 1. A single lookup against
+   any published hash table would immediately reveal this. A compromised
+   staff_id gives an attacker full application-level access.
+   
+
+------------------------------------------------------------------------
+6. IDENTIFIED VULNERABILITY AND SUGGESTED IMPROVEMENT
+------------------------------------------------------------------------
+
+Vulnerability:
+The "staff" table stores passwords as SHA-1 hashes, which has no salt and
+is fast to compute, making it trivially reversible with rainbow tables.
+The identical hash across all five staff rows confirms the password is
+"1" for every account, since 8cb2237d0679ca88db6464eac60da96345513964 is
+the well-known SHA-1 of that string. A single table read exposes all staff
+credentials at once.
+
+Additionally, the "password" column is type text with no constraints,
+so nothing in the schema prevents someone from inserting a plaintext
+password by accident.
+
+Suggested improvement:
+1. Replace SHA-1 with a slow, salted algorithm. bcrypt via pgcrypto is
+   the standard application-side choice in PostgreSQL:
+
+	CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+	-- store a new password:
+	UPDATE public.staff
+	SET password = crypt('new_password', gen_salt('bf', 12));
+
+	-- verify a password:
+	SELECT (password = crypt('input', password)) AS is_valid
+	FROM public.staff
+	WHERE staff_id = 1;
+
+	Note: from what i understand, this is an application-layer concern.
+	PostgreSQL's own authentication (pg_hba.conf) handles login passwords
+	separately using scram-sha-256. The staff table password column IS
+	used by the application logic, not by PostgreSQL itself for connection auth.
+
+2. Revoke SELECT on the "password" column from all non-superuser roles
+   so that even if another role is compromised, the hashes are not
+   exposed:
+
+	REVOKE SELECT (password) ON public.staff FROM PUBLIC;
+
+3. Create a dedicated application role with minimal privileges instead
+   of connecting as postgres:
+
+	CREATE ROLE app_readonly NOLOGIN;
+	GRANT CONNECT ON DATABASE dvdrental TO app_readonly;
+	GRANT USAGE ON SCHEMA public TO app_readonly;
+	GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_readonly;
+	GRANT USAGE ON SCHEMA public TO app_readonly;
+	REVOKE SELECT (password) ON public.staff FROM app_readonly;
+
+4. Set connection limits to reduce the blast radius of any compromise.
+   The risk of no connection limit is exhausting max_connections on the
+   PostgreSQL server, which would deny service to all other clients:
+
+	ALTER DATABASE dvdrental CONNECTION LIMIT 100;
+	ALTER ROLE app_readonly CONNECTION LIMIT 20;

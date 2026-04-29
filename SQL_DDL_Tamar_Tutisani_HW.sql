@@ -76,11 +76,12 @@ CREATE TABLE recruitment.countries (
 
 	CONSTRAINT PK_countries_country_id PRIMARY KEY (country_id),
 
-	-- CONSTRAINT: UNIQUE on country_name
-	-- Prevents the same country being entered twice.
+	-- CONSTRAINT: UNIQUE on UPPER(country_name)
+	-- Prevents the same country being entered twice regardless of case
+	-- (e.g. 'Poland' and 'poland' would be treated as duplicates).
 	-- Without this, JOIN queries would return duplicate rows and aggregations
 	-- would be inflated.
-	CONSTRAINT UQ_countries_country_name UNIQUE (country_name)
+	CONSTRAINT UQ_countries_country_name UNIQUE (UPPER(country_name))
 );
 
 
@@ -94,11 +95,12 @@ CREATE TABLE recruitment.cities (
 
 	CONSTRAINT PK_cities_city_id PRIMARY KEY (city_id),
 
-	-- CONSTRAINT: UNIQUE(city_name, country_id)
-	-- Prevents the same city being entered twice within the same country while
-	-- allowing "London, UK" and "London, Canada" as separate rows.
+	-- CONSTRAINT: UNIQUE(UPPER(city_name), country_id)
+	-- Prevents the same city being entered twice within the same country
+	-- regardless of case, while allowing "London, UK" and "London, Canada"
+	-- as separate rows.
 	-- Without this, duplicate city rows would cause ambiguous FK joins.
-	CONSTRAINT UQ_cities_city_name_country_id UNIQUE (city_name, country_id),
+	CONSTRAINT UQ_cities_city_name_country_id UNIQUE (UPPER(city_name), country_id),
 
 	-- FK: every city belongs to exactly one country.
 	-- If FK is missing, a city could reference a non-existent country_id,
@@ -122,7 +124,9 @@ CREATE TABLE recruitment.skills (
 
 	CONSTRAINT PK_skills_skill_id PRIMARY KEY (skill_id),
 
-	CONSTRAINT UQ_skills_skill_name UNIQUE (skill_name),
+	-- CONSTRAINT: UNIQUE on UPPER(skill_name)
+	-- Prevents duplicate skills differing only by case (e.g. 'Python' vs 'python').
+	CONSTRAINT UQ_skills_skill_name UNIQUE (UPPER(skill_name)),
 
 	CONSTRAINT CHK_skills_category
 		CHECK (category IN ('technical','soft','language','domain','other')
@@ -145,7 +149,9 @@ CREATE TABLE recruitment.services (
 
 	CONSTRAINT PK_services_service_id PRIMARY KEY (service_id),
 
-	CONSTRAINT UQ_services_service_name UNIQUE (service_name),
+	-- CONSTRAINT: UNIQUE on UPPER(service_name)
+	-- Prevents duplicate services differing only by case.
+	CONSTRAINT UQ_services_service_name UNIQUE (UPPER(service_name)),
 
 	-- CONSTRAINT: price cannot be negative
 	-- Prevents a data entry mistake like price = -50.00.
@@ -171,11 +177,11 @@ CREATE TABLE recruitment.companies (
 
 	CONSTRAINT PK_companies_company_id PRIMARY KEY (company_id),
 
-	-- CONSTRAINT: UNIQUE on name
-	-- Prevents one company being entered twice as two separate companies.
+	-- CONSTRAINT: UNIQUE on UPPER(name)
+	-- Prevents one company being entered twice under different cases.
 	-- Without this, jobs could be split across duplicate rows and reporting
 	-- would double-count postings.
-	CONSTRAINT UQ_companies_name UNIQUE (name)
+	CONSTRAINT UQ_companies_name UNIQUE (UPPER(name))
 );
 
 
@@ -215,10 +221,10 @@ CREATE TABLE recruitment.candidates (
 
 	CONSTRAINT PK_candidates_candidate_id PRIMARY KEY (candidate_id),
 
-	-- CONSTRAINT: UNIQUE on email
-	-- Email is the natural business key. Duplicates would split one person's
-	-- application history across two profiles.
-	CONSTRAINT UQ_candidates_email UNIQUE (email),
+	-- CONSTRAINT: UNIQUE on UPPER(email)
+	-- Email is the natural business key. Duplicates (differing only by case)
+	-- would split one person's application history across two profiles.
+	CONSTRAINT UQ_candidates_email UNIQUE (UPPER(email)),
 
 	CONSTRAINT FK_candidates_preferred_city_id
 		FOREIGN KEY (preferred_city_id) REFERENCES recruitment.cities (city_id)
@@ -245,7 +251,9 @@ CREATE TABLE recruitment.company_representatives (
 
 	CONSTRAINT PK_company_representatives_rep_id PRIMARY KEY (rep_id),
 
-	CONSTRAINT UQ_company_representatives_email UNIQUE (email),
+	-- CONSTRAINT: UNIQUE on UPPER(email)
+	-- Prevents duplicate rep accounts differing only by email case.
+	CONSTRAINT UQ_company_representatives_email UNIQUE (UPPER(email)),
 
 	-- FK: every rep belongs to exactly one company.
 	-- If FK is missing, a rep could be assigned to a non-existent company,
@@ -631,49 +639,23 @@ VALUES
 	('Poland', 'Europe'),
 	('Germany', 'Europe'),
 	('United States', 'North America')
-ON CONFLICT (country_name) DO NOTHING;
+ON CONFLICT (UPPER(country_name)) DO NOTHING;
 
 
 -- cities
+-- FIX: All four cities are inserted in a single query. Each city's country_id
+-- is resolved inline via a correlated subquery, keeping the insert set-based
+-- and avoiding four separate round-trips.
 INSERT INTO recruitment.cities (
 	city_name,
 	country_id
 )
-SELECT 'London', 
-	   country_id 
-FROM recruitment.countries 
-WHERE country_name = 'United Kingdom'
-ON CONFLICT (city_name, country_id) DO NOTHING;
-
-INSERT INTO recruitment.cities (
-	city_name,
-	country_id
-)
-SELECT 'Warsaw',
-	   country_id 
-FROM recruitment.countries 
-WHERE country_name = 'Poland'
-ON CONFLICT (city_name, country_id) DO NOTHING;
-
-INSERT INTO recruitment.cities (
-	city_name, 
-	country_id
-)
-SELECT 'Berlin',
-	   country_id 
-FROM recruitment.countries 
-WHERE country_name = 'Germany'
-ON CONFLICT (city_name, country_id) DO NOTHING;
-
-INSERT INTO recruitment.cities (
-	city_name, 
-	country_id
-)
-SELECT 'New York',
-	   country_id
-FROM recruitment.countries
-WHERE country_name = 'United States'
-ON CONFLICT (city_name, country_id) DO NOTHING;
+VALUES
+	('London', (SELECT country_id FROM recruitment.countries WHERE UPPER(country_name) = UPPER('United Kingdom'))),
+	('Warsaw', (SELECT country_id FROM recruitment.countries WHERE UPPER(country_name) = UPPER('Poland'))),
+	('Berlin', (SELECT country_id FROM recruitment.countries WHERE UPPER(country_name) = UPPER('Germany'))),
+	('New York', (SELECT country_id FROM recruitment.countries WHERE UPPER(country_name) = UPPER('United States')))
+ON CONFLICT (UPPER(city_name), country_id) DO NOTHING;
 
 
 -- skills
@@ -687,7 +669,7 @@ VALUES
 	('Communication', 'soft'),
 	('Data Analysis', 'technical'),
 	('English', 'language')
-ON CONFLICT (skill_name) DO NOTHING;
+ON CONFLICT (UPPER(skill_name)) DO NOTHING;
 
 
 -- services
@@ -700,7 +682,7 @@ VALUES
 	('Resume Review', 'Expert CV rewrite and optimisation', 99.00),
 	('Interview Coaching', 'Mock sessions with structured feedback', 149.00),
 	('Skills Testing', 'Online assessment across technical domains', 49.00)
-ON CONFLICT (service_name) DO NOTHING;
+ON CONFLICT (UPPER(service_name)) DO NOTHING;
 
 
 -- companies
@@ -712,32 +694,13 @@ INSERT INTO recruitment.companies (
 VALUES
 	('TechCorp Ltd', 'Software', 'https://techcorp.example.com'),
 	('FinGroup AG', 'Banking', 'https://fingroup.example.com')
-ON CONFLICT (name) DO NOTHING;
+ON CONFLICT (UPPER(name)) DO NOTHING;
 
 
 -- candidates
-INSERT INTO recruitment.candidates (
-	first_name,
-	last_name,
-	email, phone,
-	date_of_birth,
-	summary,
-	preferred_city_id
-)
-SELECT
-	'Maria',
-	'Kowalska',
-	'maria.kowalska@email.com',
-	'+48 501 234 567',
-	DATE '2000-03-12',
-	'Experienced data analyst with 5 years in fintech',
-	ci.city_id
-FROM recruitment.cities ci
-JOIN recruitment.countries co ON ci.country_id = co.country_id
-WHERE ci.city_name = 'Warsaw' AND
-	  co.country_name = 'Poland'
-ON CONFLICT (email) DO NOTHING;
-
+-- All three candidates are inserted in a single query. Each preferred_city_id
+-- is resolved inline via a correlated subquery against the already-populated
+-- cities and countries tables.
 INSERT INTO recruitment.candidates (
 	first_name,
 	last_name,
@@ -747,45 +710,49 @@ INSERT INTO recruitment.candidates (
 	summary,
 	preferred_city_id
 )
-SELECT
-	'James',
-	'Obi',
-	'james.obi@email.com',
-	'+44 7911 123456',
-	DATE '2001-07-28',
-	'Full stack developer seeking senior roles in product companies',
-	ci.city_id
-FROM recruitment.cities ci
-JOIN recruitment.countries co ON ci.country_id = co.country_id
-WHERE ci.city_name = 'London' AND
-	  co.country_name = 'United Kingdom'
-ON CONFLICT (email) DO NOTHING;
-
-INSERT INTO recruitment.candidates (
-	first_name,
-	last_name,
-	email,
-	phone,
-	date_of_birth,
-	summary,
-	preferred_city_id
-)
-SELECT
-	'Anna',
-	'Schmidt',
-	'anna.schmidt@email.com',
-	'+49 30 1234567',
-	DATE '2002-11-05',
-	'Junior backend developer with 2 years Python experience',
-	ci.city_id
-FROM recruitment.cities ci
-JOIN recruitment.countries co ON ci.country_id = co.country_id
-WHERE ci.city_name = 'Berlin' AND
-	  co.country_name = 'Germany'
-ON CONFLICT (email) DO NOTHING;
+VALUES
+	(
+		'Maria',
+		'Kowalska',
+		'maria.kowalska@email.com',
+		'+48 501 234 567',
+		DATE '2000-03-12',
+		'Experienced data analyst with 5 years in fintech',
+		(SELECT ci.city_id FROM recruitment.cities ci
+		 JOIN recruitment.countries co ON ci.country_id = co.country_id
+		 WHERE UPPER(ci.city_name) = UPPER('Warsaw') AND
+			   UPPER(co.country_name) = UPPER('Poland'))
+	),
+	(
+		'James',
+		'Obi',
+		'james.obi@email.com',
+		'+44 7911 123456',
+		DATE '2001-07-28',
+		'Full stack developer seeking senior roles in product companies',
+		(SELECT ci.city_id FROM recruitment.cities ci
+		 JOIN recruitment.countries co ON ci.country_id = co.country_id
+		 WHERE UPPER(ci.city_name) = UPPER('London') AND
+			   UPPER(co.country_name) = UPPER('United Kingdom'))
+	),
+	(
+		'Anna',
+		'Schmidt',
+		'anna.schmidt@email.com',
+		'+49 30 1234567',
+		DATE '2002-11-05',
+		'Junior backend developer with 2 years Python experience',
+		(SELECT ci.city_id FROM recruitment.cities ci
+		 JOIN recruitment.countries co ON ci.country_id = co.country_id
+		 WHERE UPPER(ci.city_name) = UPPER('Berlin') AND
+			   UPPER(co.country_name) = UPPER('Germany'))
+	)
+ON CONFLICT (UPPER(email)) DO NOTHING;
 
 
 -- company_representatives
+-- Both reps are inserted in a single query. Each company_id is resolved
+-- inline via a correlated subquery.
 INSERT INTO recruitment.company_representatives (
 	company_id,
 	first_name,
@@ -794,35 +761,24 @@ INSERT INTO recruitment.company_representatives (
 	phone,
 	position
 )
-SELECT
-	company_id,
-	'Alice',
-	'Walker',
-	'alice.walker@techcorp.example',
-	'+48 123 456 789',
-	'HR Manager'
-FROM recruitment.companies 
-WHERE name = 'TechCorp Ltd'
-ON CONFLICT (email) DO NOTHING;
-
-INSERT INTO recruitment.company_representatives (
-	company_id,
-	first_name,
-	last_name,
-	email,
-	phone,
-	position
-)
-SELECT
-	company_id,
-	'Bob',
-	'Lee',
-	'bob.lee@fingroup.example',
-	'+49 30 987 654',
-	'Talent Acquisition Lead'
-FROM recruitment.companies
-WHERE name = 'FinGroup AG'
-ON CONFLICT (email) DO NOTHING;
+VALUES
+	(
+		(SELECT company_id FROM recruitment.companies WHERE UPPER(name) = UPPER('TechCorp Ltd')),
+		'Alice',
+		'Walker',
+		'alice.walker@techcorp.example',
+		'+48 123 456 789',
+		'HR Manager'
+	),
+	(
+		(SELECT company_id FROM recruitment.companies WHERE UPPER(name) = UPPER('FinGroup AG')),
+		'Bob',
+		'Lee',
+		'bob.lee@fingroup.example',
+		'+49 30 987 654',
+		'Talent Acquisition Lead'
+	)
+ON CONFLICT (UPPER(email)) DO NOTHING;
 
 
 -- jobs
@@ -846,12 +802,12 @@ SELECT
 	'full_time',
 	'hybrid'
 FROM recruitment.companies co
-JOIN recruitment.cities ci ON ci.city_name = 'London'
-WHERE co.name = 'TechCorp Ltd' AND
+JOIN recruitment.cities ci ON UPPER(ci.city_name) = UPPER('London')
+WHERE UPPER(co.name) = UPPER('TechCorp Ltd') AND
 	  NOT EXISTS (
 		  SELECT 1
 		  FROM recruitment.jobs j
-		  WHERE j.title = 'Python Backend Developer' AND
+		  WHERE UPPER(j.title) = UPPER('Python Backend Developer') AND
 			    j.company_id = co.company_id
 	  );
 
@@ -875,12 +831,12 @@ SELECT
 	'full_time',
 	'on_site'
 FROM recruitment.companies co
-JOIN recruitment.cities ci ON ci.city_name = 'Warsaw'
-WHERE co.name = 'FinGroup AG' AND
+JOIN recruitment.cities ci ON UPPER(ci.city_name) = UPPER('Warsaw')
+WHERE UPPER(co.name) = UPPER('FinGroup AG') AND
 	  NOT EXISTS (
 		  SELECT 1
 		  FROM recruitment.jobs j
-		  WHERE j.title = 'Financial Analyst' AND
+		  WHERE UPPER(j.title) = UPPER('Financial Analyst') AND
 			    j.company_id = co.company_id
 	  );
 
@@ -904,11 +860,11 @@ SELECT
 	'contract',
 	'remote'
 FROM recruitment.companies co
-WHERE co.name = 'TechCorp Ltd' AND
+WHERE UPPER(co.name) = UPPER('TechCorp Ltd') AND
 	  NOT EXISTS (
 		  SELECT 1
 		  FROM recruitment.jobs j
-		  WHERE j.title = 'DevOps Engineer' AND
+		  WHERE UPPER(j.title) = UPPER('DevOps Engineer') AND
 			    j.company_id = co.company_id
 	  );
 
@@ -926,8 +882,8 @@ SELECT ca.candidate_id,
 	   DATE '2020-06-01'
 FROM recruitment.candidates ca, 
 	 recruitment.skills sk
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  sk.skill_name = 'Python'
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(sk.skill_name) = UPPER('Python')
 ON CONFLICT (candidate_id, skill_id) DO NOTHING;
 
 INSERT INTO recruitment.candidate_skills (
@@ -942,8 +898,8 @@ SELECT ca.candidate_id,
 	   DATE '2019-01-01'
 FROM recruitment.candidates ca,
 	 recruitment.skills sk
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  sk.skill_name = 'SQL'
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(sk.skill_name) = UPPER('SQL')
 ON CONFLICT (candidate_id, skill_id) DO NOTHING;
 
 INSERT INTO recruitment.candidate_skills (
@@ -958,8 +914,8 @@ SELECT ca.candidate_id,
 	   DATE '2022-03-15'
 FROM recruitment.candidates ca,
 	 recruitment.skills sk
-WHERE ca.email = 'james.obi@email.com' AND
-	  sk.skill_name = 'Python'
+WHERE UPPER(ca.email) = UPPER('james.obi@email.com') AND
+	  UPPER(sk.skill_name) = UPPER('Python')
 ON CONFLICT (candidate_id, skill_id) DO NOTHING;
 
 INSERT INTO recruitment.candidate_skills (
@@ -974,8 +930,8 @@ SELECT ca.candidate_id,
 	   DATE '2023-09-10'
 FROM recruitment.candidates ca,
 	 recruitment.skills sk
-WHERE ca.email = 'anna.schmidt@email.com' AND
-	  sk.skill_name = 'Python'
+WHERE UPPER(ca.email) = UPPER('anna.schmidt@email.com') AND
+	  UPPER(sk.skill_name) = UPPER('Python')
 ON CONFLICT (candidate_id, skill_id) DO NOTHING;
 
 
@@ -998,13 +954,13 @@ SELECT
 	'ETL pipelines and dashboard reporting', 
 	FALSE
 FROM recruitment.candidates 
-WHERE email = 'maria.kowalska@email.com' AND
+WHERE UPPER(email) = UPPER('maria.kowalska@email.com') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.work_experience we
 		  JOIN recruitment.candidates ca ON ca.candidate_id = we.candidate_id
-		  WHERE ca.email = 'maria.kowalska@email.com' AND 
-			    we.company_name = 'DataSoft GmbH'
+		  WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND 
+			    UPPER(we.company_name) = UPPER('DataSoft GmbH')
 	  );
 
 INSERT INTO recruitment.work_experience (
@@ -1025,13 +981,13 @@ SELECT
 	'Leading analytics team and stakeholder reporting',
 	TRUE
 FROM recruitment.candidates 
-WHERE email = 'maria.kowalska@email.com' AND
+WHERE UPPER(email) = UPPER('maria.kowalska@email.com') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.work_experience we
 		  JOIN recruitment.candidates ca ON ca.candidate_id = we.candidate_id
-		  WHERE ca.email = 'maria.kowalska@email.com' AND
-			    we.company_name = 'Analytics Inc.'
+		  WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+			    UPPER(we.company_name) = UPPER('Analytics Inc.')
 	  );
 
 INSERT INTO recruitment.work_experience (
@@ -1052,13 +1008,13 @@ SELECT
 	'Full stack development with React and Node.js',
 	TRUE
 FROM recruitment.candidates 
-WHERE email = 'james.obi@email.com' AND
+WHERE UPPER(email) = UPPER('james.obi@email.com') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.work_experience we
 		  JOIN recruitment.candidates ca ON ca.candidate_id = we.candidate_id
-		  WHERE ca.email = 'james.obi@email.com' AND
-			    we.company_name = 'WebStart Ltd'
+		  WHERE UPPER(ca.email) = UPPER('james.obi@email.com') AND
+			    UPPER(we.company_name) = UPPER('WebStart Ltd')
 	  );
 
 
@@ -1082,15 +1038,15 @@ SELECT
 	'CV restructured, quantified achievements added'
 FROM recruitment.candidates ca, 
 	 recruitment.services sv
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  sv.service_name = 'Resume Review' AND
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(sv.service_name) = UPPER('Resume Review') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.candidate_services cs
 		  JOIN recruitment.candidates c ON c.candidate_id = cs.candidate_id
 		  JOIN recruitment.services s ON s.service_id = cs.service_id
-		  WHERE c.email = 'maria.kowalska@email.com' AND
-			    s.service_name = 'Resume Review' AND
+		  WHERE UPPER(c.email) = UPPER('maria.kowalska@email.com') AND
+			    UPPER(s.service_name) = UPPER('Resume Review') AND
 			    cs.status = 'completed'
 	  );
 
@@ -1113,15 +1069,15 @@ SELECT
 	'Two sessions completed, one remaining'
 FROM recruitment.candidates ca, 
 	 recruitment.services sv
-WHERE ca.email = 'james.obi@email.com' AND
-	  sv.service_name = 'Interview Coaching' AND
+WHERE UPPER(ca.email) = UPPER('james.obi@email.com') AND
+	  UPPER(sv.service_name) = UPPER('Interview Coaching') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.candidate_services cs
 		  JOIN recruitment.candidates c ON c.candidate_id = cs.candidate_id
 		  JOIN recruitment.services s ON s.service_id = cs.service_id
-		  WHERE c.email = 'james.obi@email.com' AND
-			    s.service_name = 'Interview Coaching' AND
+		  WHERE UPPER(c.email) = UPPER('james.obi@email.com') AND
+			    UPPER(s.service_name) = UPPER('Interview Coaching') AND
 			    cs.is_active = TRUE
 	  );
 
@@ -1136,10 +1092,10 @@ SELECT ca.candidate_id,
 	   j.job_id,
 	   TIMESTAMPTZ '2024-05-01 08:00:00+00'
 FROM recruitment.candidates ca
-JOIN recruitment.jobs j ON j.title = 'Python Backend Developer'
+JOIN recruitment.jobs j ON UPPER(j.title) = UPPER('Python Backend Developer')
 JOIN recruitment.companies co ON co.company_id = j.company_id AND
-								 co.name = 'TechCorp Ltd'
-WHERE ca.email = 'maria.kowalska@email.com'
+								 UPPER(co.name) = UPPER('TechCorp Ltd')
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com')
 ON CONFLICT (candidate_id, job_id) DO NOTHING;
 
 INSERT INTO recruitment.applications (
@@ -1151,10 +1107,10 @@ SELECT ca.candidate_id,
 	   j.job_id,
 	   TIMESTAMPTZ '2024-05-10 10:15:00+00'
 FROM recruitment.candidates ca
-JOIN recruitment.jobs j ON j.title = 'Financial Analyst'
+JOIN recruitment.jobs j ON UPPER(j.title) = UPPER('Financial Analyst')
 JOIN recruitment.companies co ON co.company_id = j.company_id AND
-								 co.name = 'FinGroup AG'
-WHERE ca.email = 'james.obi@email.com'
+								 UPPER(co.name) = UPPER('FinGroup AG')
+WHERE UPPER(ca.email) = UPPER('james.obi@email.com')
 ON CONFLICT (candidate_id, job_id) DO NOTHING;
 
 INSERT INTO recruitment.applications (
@@ -1166,10 +1122,10 @@ SELECT ca.candidate_id,
 	   j.job_id,
 	   TIMESTAMPTZ '2024-05-12 09:00:00+00'
 FROM recruitment.candidates ca
-JOIN recruitment.jobs j ON j.title = 'DevOps Engineer'
+JOIN recruitment.jobs j ON UPPER(j.title) = UPPER('DevOps Engineer')
 JOIN recruitment.companies co ON co.company_id = j.company_id AND
-								 co.name = 'TechCorp Ltd'
-WHERE ca.email = 'anna.schmidt@email.com'
+								 UPPER(co.name) = UPPER('TechCorp Ltd')
+WHERE UPPER(ca.email) = UPPER('anna.schmidt@email.com')
 ON CONFLICT (candidate_id, job_id) DO NOTHING;
 
 -- application_status_history
@@ -1188,8 +1144,8 @@ SELECT a.application_id,
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  j.title = 'Python Backend Developer' AND
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(j.title) = UPPER('Python Backend Developer') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.application_status_history h
@@ -1212,8 +1168,8 @@ SELECT a.application_id,
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  j.title = 'Python Backend Developer' AND
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(j.title) = UPPER('Python Backend Developer') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.application_status_history h
@@ -1236,8 +1192,8 @@ SELECT a.application_id,
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-WHERE ca.email = 'james.obi@email.com' AND
-	  j.title = 'Financial Analyst' AND
+WHERE UPPER(ca.email) = UPPER('james.obi@email.com') AND
+	  UPPER(j.title) = UPPER('Financial Analyst') AND
 	  NOT EXISTS (
 		  SELECT 1
 		  FROM recruitment.application_status_history h
@@ -1260,8 +1216,8 @@ SELECT a.application_id,
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-WHERE ca.email = 'anna.schmidt@email.com' AND
-	  j.title = 'DevOps Engineer' AND
+WHERE UPPER(ca.email) = UPPER('anna.schmidt@email.com') AND
+	  UPPER(j.title) = UPPER('DevOps Engineer') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.application_status_history h
@@ -1292,9 +1248,9 @@ SELECT
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-JOIN recruitment.company_representatives r ON r.email = 'alice.walker@techcorp.example'
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  j.title = 'Python Backend Developer' AND
+JOIN recruitment.company_representatives r ON UPPER(r.email) = UPPER('alice.walker@techcorp.example')
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(j.title) = UPPER('Python Backend Developer') AND
 	  NOT EXISTS (
 		  SELECT 1 
 		  FROM recruitment.interviews i
@@ -1325,12 +1281,12 @@ SELECT
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-JOIN recruitment.company_representatives r ON r.email = 'alice.walker@techcorp.example'
-JOIN recruitment.cities ci ON ci.city_name = 'London'
+JOIN recruitment.company_representatives r ON UPPER(r.email) = UPPER('alice.walker@techcorp.example')
+JOIN recruitment.cities ci ON UPPER(ci.city_name) = UPPER('London')
 JOIN recruitment.countries co ON co.country_id = ci.country_id AND
-								 co.country_name = 'United Kingdom'
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  j.title = 'Python Backend Developer' AND
+								 UPPER(co.country_name) = UPPER('United Kingdom')
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(j.title) = UPPER('Python Backend Developer') AND
 	  NOT EXISTS (
 		  SELECT 1
 		  FROM recruitment.interviews i
@@ -1356,8 +1312,8 @@ SELECT
 FROM recruitment.applications a
 JOIN recruitment.candidates ca ON ca.candidate_id = a.candidate_id
 JOIN recruitment.jobs j ON j.job_id = a.job_id
-WHERE ca.email = 'maria.kowalska@email.com' AND
-	  j.title = 'Python Backend Developer'
+WHERE UPPER(ca.email) = UPPER('maria.kowalska@email.com') AND
+	  UPPER(j.title) = UPPER('Python Backend Developer')
 ON CONFLICT (application_id) DO NOTHING;
 
 

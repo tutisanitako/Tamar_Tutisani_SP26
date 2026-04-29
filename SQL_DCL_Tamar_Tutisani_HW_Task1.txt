@@ -169,6 +169,12 @@ Findings:
  - The datacl column is NULL, meaning no explicit CONNECT/TEMP grant has
    been applied. PUBLIC has the default CONNECT and TEMPORARY privileges
    inherited from the database creation.
+ - Note: pg_database does not store authentication methods. Those are
+   configured in pg_hba.conf. If the superuser has file access, they can
+   be inspected via the pg_hba_file_rules view:
+
+	SELECT type, database, user_name, address, auth_method
+	FROM pg_catalog.pg_hba_file_rules;
 
 
 ------------------------------------------------------------------------

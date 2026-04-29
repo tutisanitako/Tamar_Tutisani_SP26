@@ -16,7 +16,12 @@ Give the user the ability to connect to the database but no other permissions.
 
 -- At this point they can connect to the database but can't do 
 -- anything once inside, no schema access, no table access.
-CREATE USER rentaluser WITH LOGIN PASSWORD 'rentalpassword';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'rentaluser') THEN
+        CREATE USER rentaluser WITH LOGIN PASSWORD 'rentalpassword';
+    END IF;
+END $$;
 
 GRANT CONNECT ON DATABASE dvdrental TO rentaluser;
 
@@ -33,7 +38,7 @@ WHERE rolname = 'rentaluser';
 -----------------------------------------------------------------------------
 /*
 Task:
-Grant "rentaluser" permission allows reading data from the "customer" table. 
+Grant "rentaluser" permission allows reading data from the "customer" table. 
 Сheck to make sure this permission works correctly: write a SQL query to select all customers.
 */
 
@@ -61,7 +66,14 @@ INSERT INTO public.customer (
 	activebool,
 	create_date
 )
-VALUES (1, 'Test', 'User', 1, true, now());
+VALUES (
+	(SELECT store_id FROM public.store LIMIT 1),
+	'Test',
+	'User',
+	(SELECT address_id FROM public.address LIMIT 1),
+	TRUE,
+	now()
+);
 -- Expected: ERROR: permission denied for table customer
 
 RESET ROLE;
@@ -77,7 +89,12 @@ Create a new user group called "rental" and add "rentaluser" to the group.
 -- NOLOGIN because this is a group role, not a real user.
 -- INHERIT (default) means rentaluser automatically gets whatever we
 -- grant to this group without needing SET ROLE.
-CREATE ROLE rental NOLOGIN INHERIT;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'rental') THEN
+        CREATE ROLE rental NOLOGIN INHERIT;
+    END IF;
+END $$;
 
 GRANT rental TO rentaluser;
 
@@ -95,8 +112,8 @@ WHERE r.rolname = 'rental';
 -----------------------------------------------------------------------------
 /*
 Task:
-Grant the "rental" group INSERT and UPDATE permissions for the "rental" table.
-Insert a new row and update one existing row in the "rental" table under that role. 
+Grant the "rental" group INSERT and UPDATE permissions for the "rental" table.
+Insert a new row and update one existing row in the "rental" table under that role. 
 */
 
 -- The sequence grant is needed so INSERT can get the next rental_id.
@@ -124,10 +141,10 @@ INSERT INTO public.rental (
 )
 VALUES (
 	'2017-01-20 12:00:00+00',
-	367,
-	130,
+	(SELECT inventory_id FROM public.inventory LIMIT 1),
+	(SELECT customer_id FROM public.customer WHERE activebool = TRUE LIMIT 1),
 	NULL,
-	1,
+	(SELECT staff_id FROM public.staff LIMIT 1),
 	now()
 )
 RETURNING
@@ -143,7 +160,7 @@ RETURNING
 UPDATE public.rental
 SET return_date = '2017-01-27 12:00:00+00'
 WHERE rental_date = '2017-01-20 12:00:00+00' AND 
-	  customer_id = 130
+	  customer_id = (SELECT customer_id FROM public.customer WHERE activebool = TRUE LIMIT 1)
 RETURNING
 	rental_id,
 	rental_date,
@@ -157,7 +174,7 @@ SET ROLE rentaluser;
 
 DELETE FROM public.rental
 WHERE rental_date = '2017-01-20 12:00:00+00' AND
-	  customer_id = 130;
+	  customer_id = (SELECT customer_id FROM public.customer WHERE activebool = TRUE LIMIT 1);
 -- Expected: ERROR: permission denied for table rental
 
 RESET ROLE;
@@ -167,7 +184,7 @@ RESET ROLE;
 -----------------------------------------------------------------------------
 /*
 Task:
-Revoke the "rental" group's INSERT permission for the "rental" table.
+Revoke the "rental" group's INSERT permission for the "rental" table.
 Try to insert new rows into the "rental" table make sure this action is denied.
 */
 
@@ -186,10 +203,10 @@ INSERT INTO public.rental (
 )
 VALUES (
 	'2017-01-21 12:00:00+00',
-	367,
-	130,
+	(SELECT inventory_id FROM public.inventory LIMIT 1),
+	(SELECT customer_id FROM public.customer WHERE activebool = TRUE LIMIT 1),
 	NULL,
-	1,
+	(SELECT staff_id FROM public.staff LIMIT 1),
 	now()
 );
 -- Expected: ERROR: permission denied for table rental
@@ -201,8 +218,8 @@ SET ROLE rentaluser;
 
 UPDATE public.rental
 SET last_update = now()
-WHERE rental_date = '2017-01-20 12:00:00+00'
-  AND customer_id = 130
+WHERE rental_date = '2017-01-20 12:00:00+00' AND
+	  customer_id = (SELECT customer_id FROM public.customer WHERE activebool = TRUE LIMIT 1)
 RETURNING
 	rental_id,
 	last_update;
@@ -248,7 +265,12 @@ The customer's payment and rental history must not be empty.
 
 -- Result: customer_id = 236, 84 rentals, 84 payments
 
-CREATE ROLE client_marcia_dean LOGIN PASSWORD 'client_marcia_dean_pass';
+DO $$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'client_marcia_dean') THEN
+        CREATE ROLE client_marcia_dean LOGIN PASSWORD 'client_marcia_dean_pass';
+    END IF;
+END $$;
 
 GRANT CONNECT ON DATABASE dvdrental TO client_marcia_dean;
 GRANT USAGE ON SCHEMA public TO client_marcia_dean;
@@ -277,7 +299,7 @@ reflects the role set via SET ROLE regardless of the SECURITY DEFINER
 context. this means the function is designed for use via proxy
 authentication (SET ROLE). If client_marcia_dean connects directly
 without SET ROLE, current_setting('role') returns an empty string and
-the function wouldreturn NULL, filtering out all rows.
+the function would return NULL, filtering out all rows.
 
 Notes:
 1. EXECUTE on this function is revoked from PUBLIC and granted
@@ -329,7 +351,7 @@ $$;
 
 
 -- Grant EXECUTE explicitly to the client role.
--- revoke from PUBLIC so random roles can't call it directly,
+-- Revoke from PUBLIC so random roles can't call it directly,
 -- but the policy engine still works because client_marcia_dean
 -- has the explicit grant.
 REVOKE EXECUTE ON FUNCTION public.fn_current_customer_id() FROM PUBLIC;
@@ -337,7 +359,11 @@ GRANT EXECUTE ON FUNCTION public.fn_current_customer_id() TO client_marcia_dean;
 
 
 -- Enable RLS and create the policy for rental.
+-- DROP ... IF EXISTS makes this block re-runnable: re-running the script
+-- after the policy already exists won't error out.
 ALTER TABLE public.rental ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS client_see_own_rentals ON public.rental;
 
 -- FOR SELECT only. INSERT/UPDATE policies aren't needed because
 -- client_marcia_dean has no INSERT or UPDATE grant on this table,
@@ -363,6 +389,8 @@ ALTER TABLE public.payment_p2017_03 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.payment_p2017_04 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.payment_p2017_05 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.payment_p2017_06 ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS client_see_own_payments ON public.payment;
 
 CREATE POLICY client_see_own_payments
 	ON public.payment
@@ -411,15 +439,15 @@ RESET ROLE;
 -- DENIED: client_marcia_dean must not see rows belonging to other customers.
 SET ROLE client_marcia_dean;
 
--- RLS silently filters these out. 0 rows returned, not an error, which's 
+-- RLS silently filters these out. 0 rows returned, not an error, which is 
 -- the correct RLS behaviour: the rows just don't appear.
 SELECT *
 FROM public.rental
-WHERE customer_id = 1;
+WHERE customer_id = (SELECT customer_id FROM public.customer WHERE first_name = 'Mary' LIMIT 1);
 
 SELECT *
 FROM public.payment
-WHERE customer_id = 1;
+WHERE customer_id = (SELECT customer_id FROM public.customer WHERE first_name = 'Mary' LIMIT 1);
 
 -- No SELECT was granted on customer at all.
 -- Expected: ERROR: permission denied for table customer

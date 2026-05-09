@@ -1,0 +1,177 @@
+SQL DCL Homework: Task 4
+Questions with dvdrental Examples
+------------------------------------------------------------------------
+
+
+Q1. How can one restrict access to certain columns of a database table?
+------------------------------------------------------------------------
+
+In PostgreSQL you don't have to grant access to a whole table at once,
+you can go down to the column level. You just list the specific columns
+you want to allow in the GRANT statement, and anything not listed stays
+off-limits for that role.
+
+	GRANT  SELECT (col1, col2) ON table_name TO role_name;
+	REVOKE SELECT (col3) ON table_name FROM role_name;
+
+dvdrental example:
+The "staff" table has a "password" column that really shouldn't be
+visible to most roles. Imagine we create a read-only reporting role:
+	CREATE ROLE staff_reporter NOLOGIN;
+	GRANT USAGE ON SCHEMA public TO staff_reporter;
+
+	-- Only allow reading the safe columns, not password:
+	GRANT SELECT (
+		staff_id,
+		first_name,
+		last_name,
+		address_id,
+		email,
+		store_id,
+		active,
+		username,
+		last_update
+	) ON public.staff TO staff_reporter;
+
+  A member of staff_reporter can do this fine:
+
+	-- Works:
+	SET ROLE staff_reporter;
+	SELECT first_name, last_name, email FROM public.staff;
+
+  But this fails immediately:
+
+	-- ERROR: permission denied for table staff
+  	SET ROLE staff_reporter;
+	SELECT password FROM public.staff;
+
+we could do the same thing for the "customer" table. for example, a
+customer-service role might need first_name, last_name, email but
+should never see address_id or create_date.
+
+real scenario:
+A healthcare provider needs to give a data scientist access to the
+"patient_records" table for trend analysis. To comply with HIPAA,
+the DBA grants access to diagnosis_code and treatment_date but
+omits columns like ssn, phone_number, and home_address. This ensures
+the researcher can perform calculations without ever seeing
+identifiable personal data.
+
+
+
+Q2. What is the difference between user identification and user authentication?
+------------------------------------------------------------------------
+ 
+Identification means telling the system who you ARE, basically just
+providing your username. Authentication means actually proving it, for
+example by supplying the correct password.
+ 
+identification is claiming an identity, authentication is verifying that claim.
+They always happen together when connecting to a database, but they are two separate steps.
+ 
+In PostgreSQL: when you run
+ 
+	psql -U rentaluser -d dvdrental
+ 
+you are identifying yourself as "rentaluser". PostgreSQL then checks
+pg_hba.conf to decide how to verify that claim. If the method is
+"scram-sha-256", it will ask for a password and check it against the
+stored hash, that is the authentication step. Only after both steps
+succeed does the connection go through.
+ 
+In the context of dvdrental, when client_marcia_dean connects, she
+first identifies herself by sending the role name. PostgreSQL then
+looks up the matching pg_hba.conf entry and verifies her password. If
+pg_hba.conf is set to "trust" for local connections, the identification
+step alone is enough and no password is required at ALL, which is
+obviously dangerous in any real environment.
+ 
+The practical difference matters because you can know someone's username
+(identification) and still not be able to connect without their
+credentials (authentication). For example, even if a connection string
+gets intercepted and the role name is exposed, the attacker still
+cannot connect without the actual password.
+ 
+ 
+------------------------------------------------------------------------
+Q3. What are the recommended authentication protocols for PostgreSQL?
+------------------------------------------------------------------------
+ 
+PostgreSQL supports multiple authentication methods. The main ones are:
+ 
+SCRAM-SHA-256 is the recommended default since PostgreSQL 10. The
+password is never transmitted in plaintext, the protocol uses a
+salted, iterated SHA-256 hash and protects against both replay attacks
+and offline cracking. It is configured in pg_hba.conf as
+"scram-sha-256", and the server-side parameter password_encryption
+should be set to match.
+ 
+Certificate-based authentication (method "cert") is even stronger
+because no password is involved at all. The client proves its identity
+with an X.509 certificate signed by a trusted CA. The private key never
+leaves the client. This is the preferred option for automated
+server-to-server connections.
+ 
+GSSAPI / Kerberos (method "gssapi") is used in enterprise environments
+with Active Directory. The user already has a Kerberos ticket from
+logging into their machine, so no separate database password is needed.
+ 
+LDAP is acceptable but not preferred, because the password still passes
+through PostgreSQL before being forwarded to the directory server. SSL
+is mandatory if you use it.
+ 
+The methods to avoid are "trust" (no authentication at all), "md5"
+(deprecated and crackable offline), and "password" (sends the
+plaintext password over the wire).
+
+One additional method worth knowing is "peer", used for local Unix
+socket connections. PostgreSQL asks the OS for the connecting user's
+system username and checks it matches the requested role name. No
+password needed. This is how most local superuser access works by
+default (the postgres system user connecting as the postgres role),
+and it is safe for local admin access since it relies on OS-level
+identity rather than a password that could be intercepted.
+ 
+For our dvdrental client roles the pg_hba.conf entry should look like:
+
+	hostssl dvdrental  client_marcia_dean  10.0.0.0/24  scram-sha-256
+
+The "hostssl" part requires an encrypted connection and "scram-sha-256"
+ensures the password is never sent in plaintext.
+ 
+ 
+Q4. What is proxy authentication in PostgreSQL and what is it for?
+    Why does it make role-based access control easier to implement?
+------------------------------------------------------------------------
+ 
+Proxy authentication is when one database role authenticates on behalf
+of another. This usually means a connection pooler (like PgBouncer
+connects to PostgreSQL once using its own credentials, and then
+switches to the correct user role with SET ROLE before running each
+request. When the request is done it runs RESET ROLE and the connection
+goes back to the pool.
+ 
+The flow looks like this:
+ 
+1. The pooler connects as "app_proxy" using its own password.
+2. For each incoming user request:
+ 
+	SET ROLE client_marcia_dean;
+ 
+3. All SQL runs under client_marcia_dean's privileges and RLS policies.
+4. When done:
+ 
+	RESET ROLE;
+ 
+The reason this makes RBAC much easier to manage is that without it
+every single user would need their own pg_hba.conf entry, their own
+password, and potentially their own persistent connection. With proxy
+authentication there IS just one entry in pg_hba.conf for the pooler.
+All the role definitions, grants, and RLS policies live in the DATABASE
+and the pooler just activates the right one per request. Adding a NEW
+user only means creating a new ROLE, no changes to connection configuration needed.
+ 
+Without this pattern, a platform with 50,000 customers would need
+50,000 pg_hba.conf entries and potentially 50,000 open connections.
+With proxy authentication it is one pooler entry, a small pool of
+backend connections, and one SET ROLE call per request.

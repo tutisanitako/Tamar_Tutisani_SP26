@@ -22,8 +22,8 @@ WITH base_sales AS (
 	INNER JOIN sh.countries co ON co.country_id = cu.country_id
 	INNER JOIN sh.times ti ON ti.time_id = sa.time_id
 	WHERE
-		co.country_region IN ('Americas', 'Asia', 'Europe') AND
-		ti.calendar_year IN (1999, 2000, 2001)
+		LOWER(co.country_region) IN ('americas', 'asia', 'europe') AND
+		ti.calendar_year IN (1998, 1999, 2000, 2001)
 	GROUP BY
 		co.country_region,
 		ti.calendar_year,
@@ -72,6 +72,7 @@ SELECT
 		) || ' %'
 	END AS "% DIFF"
 FROM with_prev
+WHERE calendar_year IN (1999, 2000, 2001)
 ORDER BY
 	country_region ASC,
 	calendar_year ASC,
@@ -96,7 +97,7 @@ WITH daily_sales AS (
 	INNER JOIN sh.times ti ON ti.time_id = sa.time_id
 	WHERE
 		ti.calendar_year = 1999 AND
-		ti.calendar_week_number IN (49, 50, 51)
+		ti.calendar_week_number IN (48, 49, 50, 51, 52)
 	GROUP BY
 		ti.calendar_week_number,
 		ti.time_id,
@@ -129,17 +130,17 @@ SELECT
 	ROUND(cum_sum, 2) AS cum_sum,
 	ROUND(
 		CASE day_of_week
-			WHEN 1 THEN  -- Monday
-				(prev_2_sales + prev_1_sales + sales + next_1_sales) / 3.0
-			WHEN 5 THEN  -- Friday
-				-- Thu | Fri | [Sat+Sun] = 3 logical units → divide by 3.
-				(prev_1_sales + sales + next_1_sales + next_2_sales) / 3.0
+			WHEN 1 THEN  -- Monday: Sat + Sun + Mon + Tue = 4
+				(prev_2_sales + prev_1_sales + sales + next_1_sales) / 4.0
+			WHEN 5 THEN  -- Friday: Thu + Fri + Sat + Sun = 4
+				(prev_1_sales + sales + next_1_sales + next_2_sales) / 4.0
 			ELSE
 				(prev_1_sales + sales + next_1_sales) / 3.0
 		END,
 		2
 	) AS centered_3_day_avg
 FROM with_neighbors
+WHERE calendar_week_number IN (49, 50, 51)
 ORDER BY
 	time_id ASC;
 

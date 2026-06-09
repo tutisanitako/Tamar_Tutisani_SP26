@@ -65,17 +65,15 @@ def task_6(data: List[Any]):
 
 
 def task_7(words: List[str]) -> str:
-    # Compare characters position by position across all strings.
-    # Stop as soon as any string runs out of characters or a mismatch is found.
-    if not words:
-        return ""
+    # zip(*words) groups characters by position across all strings and stops
+    # at the shortest word automatically, so no index errors.
+    # If all characters at a position are the same, add to prefix, otherwise stop.
     prefix = ""
-    for i in range(len(words[0])):
-        char = words[0][i]
-        for word in words[1:]:
-            if i >= len(word) or word[i] != char:
-                return prefix
-        prefix += char
+    for chars in zip(*words):
+        if len(set(chars)) == 1:
+            prefix += chars[0]
+        else:
+            break
     return prefix
 
 

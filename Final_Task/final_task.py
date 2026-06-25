@@ -147,7 +147,6 @@ def process_query(queries, index) -> None:
     """
     inverted_index = InvertedIndex.load(index)
     for query in queries:
-        print(query[0])
         if isinstance(query, str):
             query = query.strip().split()
 
@@ -214,11 +213,14 @@ def main():
     """
     parser = ArgumentParser(
         description="Inverted Index CLI is need to load, build,"
-        "process query inverted index"
+                    "process query inverted index"
     )
     setup_subparsers(parser)
     arguments = parser.parse_args()
-    arguments.callback(arguments)
+
+    # Keep only this block:
+    if hasattr(arguments, 'callback'):
+        arguments.callback(arguments)
 
 
 if __name__ == "__main__":

@@ -188,18 +188,32 @@ FROM labs.users; -- users row unchanged
 
 -- 5. ALTER parent: columns propagate to child; CHECK with NO INHERIT does NOT
 ALTER TABLE labs.person 
-ADD COLUMN status INTEGER DEFAULT 0;
+ADD COLUMN IF NOT EXISTS status INTEGER DEFAULT 0;
 -- status column now appears in BOTH labs.person and labs.users
 
-ALTER TABLE labs.person
-    ADD CONSTRAINT chk_person_status CHECK (status IN (0, 1)) NO INHERIT;
--- NO INHERIT: this check constraint stays on labs.person only, not labs.users
--- labs.users can store status = 5 without violating anything
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_person_status'
+    ) THEN
+        ALTER TABLE labs.person
+            ADD CONSTRAINT chk_person_status CHECK (status IN (0, 1)) NO INHERIT;
+		-- NO INHERIT: this check constraint stays on labs.person only, not labs.users
+		-- labs.users can store status = 5 without violating anything
+    END IF;
+END $$;
 
-ALTER TABLE labs.person 
-	ADD CONSTRAINT uq_person_id_name UNIQUE (id, name);
--- UNIQUE constraints on parent are NOT inherited by child tables
--- (unlike CHECK constraints which ARE inherited unless NO INHERIT is specified)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_person_id_name'
+    ) THEN
+        ALTER TABLE labs.person
+            ADD CONSTRAINT uq_person_id_name UNIQUE (id, name);
+		-- UNIQUE constraints on parent are NOT inherited by child tables
+		-- (unlike CHECK constraints which ARE inherited unless NO INHERIT is specified)
+    END IF;
+END $$;
 
 -- Inspect constraints on both tables
 SELECT conname,
@@ -411,21 +425,21 @@ DROP INDEX IF EXISTS labs.idx_test_index_gin;
 DROP TABLE IF EXISTS labs.test_index;
 
 /*
-EXPECTED OBSERVATIONS:
-- GiST (Generalized Search Tree):
-    * Stores trigrams in a lossy tree structure
-    * Faster to build and update than GIN
-    * Slightly smaller
-    * Query speed: good, but GIN is usually faster for pure LIKE searches
-    * Better choice when: frequent INSERTs/UPDATEs to the indexed column
-- GIN (Generalized Inverted Index):
-    * Stores exact inverted index of trigrams → faster lookups
-    * Larger index size than GiST
-    * Slower to build and update (more expensive on writes)
-    * Query speed: faster than GiST for LIKE/full-text/array searches
-    * Better choice when: read-heavy, infrequent writes, need fastest LIKE
-- For DWH: GIN is preferred for LIKE searches on product/customer name
-  columns where updates are rare (dimension tables change infrequently).
+OBSERVATIONS:
+- Baseline (no index): Seq Scan, reads all 10M rows, slow.
+
+- GIN is faster for LIKE queries because it stores an exact inverted index
+  of trigrams with no false positives, so no table recheck is needed.
+  GiST uses a lossy tree structure and must recheck matches against the
+  actual rows, adding overhead.
+
+- GiST is larger than GIN here (1769 MB vs 600 MB) because its tree
+  structure requires internal node pages and padding. GIN stores each
+  unique trigram once with compact posting lists.
+
+- GiST builds faster and handles frequent updates better. GIN is the
+  better choice for read-heavy workloads with rare updates, which matches
+  our DWH dimension tables.
 */
 
 

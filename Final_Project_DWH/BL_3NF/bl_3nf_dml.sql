@@ -1,526 +1,857 @@
--- BL_3NF DDL: 3NF Layer Tables, Sequences, Default Rows, CE_DATES population
--- Global Retail Superstore Sales
--- Tamar Tutisani
+-- BL_3NF DML: Loading procedures for all CE_ tables
+-- Global Retail Superstore Sales | Tamar Tutisani
+-- Run this FIFTH, after bl_3nf_ddl.sql.
 --
--- DDL DESIGN NOTE:
--- Using CREATE TABLE IF NOT EXISTS instead of DROP TABLE IF EXISTS CASCADE.
--- This is safer for production: if the table already exists with data,
--- the script skips creation rather than destroying it.
--- To reset completely, run a separate cleanup script (DROP SCHEMA bl_3nf CASCADE)
--- and then re-run this DDL from scratch.
--- Sequences use CREATE SEQUENCE IF NOT EXISTS for the same reason.
+-- Contains:
+--   - fn_get_source_categories() : function returning SETOF composite type
+--   - prc_load_product_categories()
+--   - prc_load_product_subcategories()
+--   - prc_load_products()
+--   - prc_load_markets()
+--   - prc_load_regions()
+--   - prc_load_countries()
+--   - prc_load_states()
+--   - prc_load_cities()
+--   - prc_load_customers_scd()  <- FIXED: includes full SCD2 versioning logic
+--   - prc_load_employees()
+--   - prc_load_order_attributes()
+--   - prc_load_all_3nf()  (master procedure)
 --
--- Convention for default rows:
---   Numeric IDs  : -1
---   Text fields  : COALESCE(NULL, 'n.a.') — explicit NULL handling
---   insert/update: '1900-01-01'
---   end_dt       : '9999-12-31'
---   source_system: 'MANUAL'
---   source_entity: 'MANUAL'
+-- Every procedure is idempotent (WHERE NOT EXISTS / ON CONFLICT guards).
+-- Every procedure has a EXCEPTION block and calls prc_log on success/error.
+-- Loading order respects FK dependencies.
 -----------------------------------------------------------------------------
 
--- STEP 0: Create the BL_3NF schema
------------------------------------------------------------------------------
-CREATE SCHEMA IF NOT EXISTS bl_3nf;
 
--- STEP 1: Create SEQUENCES for surrogate key generation
--- One sequence per entity table. SEQUENCES only, never SERIAL type.
------------------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_date_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_product_category_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_product_subcategory_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_product_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_market_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_region_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_country_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_state_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_city_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_customer_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_employee_id START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_3nf.seq_order_attr_id START 100 INCREMENT 1;
-
--- STEP 2: Create CE_ TABLES
+-- SECTION 1: COMPOSITE TYPE + FUNCTION RETURNING SETOF TYPE
 -----------------------------------------------------------------------------
 
--- CE_DATES (SCD Type 0 - calendar dates never change)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_dates (
-    date_id INTEGER NOT NULL PRIMARY KEY,
-    date_dt DATE NOT NULL,
-    day_of_week_no INTEGER NOT NULL,
-    day_of_week_desc VARCHAR(25) NOT NULL,
-    weekend_flag INTEGER NOT NULL,
-    iso_week_no INTEGER NOT NULL,
-    day_of_month_no INTEGER NOT NULL,
-    month_value VARCHAR(2) NOT NULL,
-    month_desc VARCHAR(25) NOT NULL,
-    quarter_value VARCHAR(1) NOT NULL,
-    quarter_desc VARCHAR(2) NOT NULL,
-    year_value VARCHAR(4) NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL
-);
+-- Composite type for category rows (used by prc_load_product_categories)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type t
+                   JOIN pg_namespace n ON n.oid = t.typnamespace
+                   WHERE t.typname = 't_category_row' AND n.nspname = 'bl_cl') THEN
+        CREATE TYPE bl_cl.t_category_row AS (
+            category_name VARCHAR(100)
+        );
+    END IF;
+END;
+$$;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ce_dates_date_dt
-    ON bl_3nf.ce_dates(date_dt);
+-- Function returning SETOF composite type
+-- Returns distinct non-null category names from both source systems.
+CREATE OR REPLACE FUNCTION bl_cl.fn_get_source_categories()
+RETURNS SETOF bl_cl.t_category_row
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT DISTINCT TRIM(category)::VARCHAR(100)
+    FROM sa_domestic.src_domestic_sales
+    WHERE category IS NOT NULL AND TRIM(category) != ''
+    UNION
+    SELECT DISTINCT TRIM(category)::VARCHAR(100)
+    FROM sa_international.src_international_sales
+    WHERE category IS NOT NULL AND TRIM(category) != '';
+END;
+$$;
 
--- CE_PRODUCT_CATEGORIES (SCD Type 1 - product hierarchy level 1)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_product_categories (
-    product_category_id BIGINT NOT NULL PRIMARY KEY,
-    product_category_src_id VARCHAR(100) NOT NULL UNIQUE,
-    product_category_name VARCHAR(100) NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL
-);
 
--- CE_PRODUCT_SUBCATEGORIES (SCD Type 1 - product hierarchy level 2)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_product_subcategories (
-    product_subcategory_id BIGINT NOT NULL PRIMARY KEY,
-    product_subcategory_src_id VARCHAR(100) NOT NULL UNIQUE,
-    product_subcategory_name VARCHAR(100) NOT NULL,
-    product_category_id BIGINT NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_subcategory_to_category
-        FOREIGN KEY (product_category_id)
-        REFERENCES bl_3nf.ce_product_categories(product_category_id)
-);
+-- SECTION 2: DIMENSION LOAD PROCEDURES
+-----------------------------------------------------------------------------
 
--- CE_PRODUCTS (SCD Type 1 - leaf of product hierarchy, conformed across both sources)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_products (
-    product_id BIGINT NOT NULL PRIMARY KEY,
-    product_src_id VARCHAR(50) NOT NULL UNIQUE,
-    product_name VARCHAR(255) NOT NULL,
-    product_subcategory_id BIGINT NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_product_to_subcategory
-        FOREIGN KEY (product_subcategory_id)
-        REFERENCES bl_3nf.ce_product_subcategories(product_subcategory_id)
-);
+-- 2.1 CE_PRODUCT_CATEGORIES
+-- Uses fn_get_source_categories() in a FOR LOOP (satisfies "FOR loop over
+-- function returning table" requirement).
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_product_categories()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_product_categories';
+    v_count INTEGER := 0;
+    v_row   bl_cl.t_category_row;
+BEGIN
+    FOR v_row IN
+        SELECT * FROM bl_cl.fn_get_source_categories()
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_product_categories
+            WHERE product_category_src_id = v_row.category_name
+        ) THEN
+            INSERT INTO bl_3nf.ce_product_categories (
+                product_category_id, product_category_src_id, product_category_name,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_product_category_id'),
+                COALESCE(v_row.category_name, 'n.a.'),
+                COALESCE(v_row.category_name, 'n.a.'),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
 
--- CE_MARKETS (SCD Type 1 - geography hierarchy level 1)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_markets (
-    market_id BIGINT NOT NULL PRIMARY KEY,
-    market_src_id VARCHAR(100) NOT NULL UNIQUE,
-    market_name VARCHAR(50) NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL
-);
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_product_categories');
 
--- CE_REGIONS (SCD Type 1 - geography hierarchy level 2)
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.2 CE_PRODUCT_SUBCATEGORIES
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_product_subcategories()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc    CONSTANT VARCHAR := 'bl_cl.prc_load_product_subcategories';
+    v_count   INTEGER := 0;
+    v_row     RECORD;
+    v_cat_id  BIGINT;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT
+            TRIM(sub_category)::VARCHAR(100) AS sub_category_name,
+            TRIM(category)::VARCHAR(100)     AS category_name
+        FROM sa_domestic.src_domestic_sales
+        WHERE sub_category IS NOT NULL AND TRIM(sub_category) != ''
+        UNION
+        SELECT DISTINCT
+            TRIM(sub_category)::VARCHAR(100),
+            TRIM(category)::VARCHAR(100)
+        FROM sa_international.src_international_sales
+        WHERE sub_category IS NOT NULL AND TRIM(sub_category) != ''
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_product_subcategories
+            WHERE product_subcategory_src_id = v_row.sub_category_name
+        ) THEN
+            SELECT COALESCE(product_category_id, -1)
+            INTO v_cat_id
+            FROM bl_3nf.ce_product_categories
+            WHERE product_category_src_id = v_row.category_name;
+
+            INSERT INTO bl_3nf.ce_product_subcategories (
+                product_subcategory_id, product_subcategory_src_id, product_subcategory_name,
+                product_category_id, insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_product_subcategory_id'),
+                COALESCE(v_row.sub_category_name, 'n.a.'),
+                COALESCE(v_row.sub_category_name, 'n.a.'),
+                COALESCE(v_cat_id, -1),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_product_subcategories');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.3 CE_PRODUCTS
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_products()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc   CONSTANT VARCHAR := 'bl_cl.prc_load_products';
+    v_count  INTEGER := 0;
+    v_row    RECORD;
+    v_sub_id BIGINT;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT ON (product_src_id)
+            product_src_id, product_name, sub_category
+        FROM (
+            SELECT DISTINCT
+                TRIM(product_id)::VARCHAR(50)   AS product_src_id,
+                TRIM(product_name)::VARCHAR(255) AS product_name,
+                TRIM(sub_category)::VARCHAR(100) AS sub_category
+            FROM sa_domestic.src_domestic_sales
+            WHERE product_id IS NOT NULL AND TRIM(product_id) != ''
+            UNION ALL
+            SELECT DISTINCT
+                TRIM(product_id)::VARCHAR(50),
+                TRIM(product_name)::VARCHAR(255),
+                TRIM(sub_category)::VARCHAR(100)
+            FROM sa_international.src_international_sales
+            WHERE product_id IS NOT NULL AND TRIM(product_id) != ''
+        ) all_products
+        ORDER BY product_src_id
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_products
+            WHERE product_src_id = v_row.product_src_id
+        ) THEN
+            SELECT COALESCE(product_subcategory_id, -1)
+            INTO v_sub_id
+            FROM bl_3nf.ce_product_subcategories
+            WHERE product_subcategory_src_id = v_row.sub_category;
+
+            INSERT INTO bl_3nf.ce_products (
+                product_id, product_src_id, product_name, product_subcategory_id,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_product_id'),
+                COALESCE(v_row.product_src_id, 'n.a.'),
+                COALESCE(v_row.product_name, 'n.a.'),
+                COALESCE(v_sub_id, -1),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_products');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.4 CE_MARKETS
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_markets()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_markets';
+    v_count INTEGER := 0;
+    v_row   RECORD;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT TRIM(market)::VARCHAR(50) AS market_name
+        FROM sa_domestic.src_domestic_sales
+        WHERE market IS NOT NULL AND TRIM(market) != ''
+        UNION
+        SELECT DISTINCT TRIM(market)::VARCHAR(50)
+        FROM sa_international.src_international_sales
+        WHERE market IS NOT NULL AND TRIM(market) != ''
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_markets WHERE market_src_id = v_row.market_name
+        ) THEN
+            INSERT INTO bl_3nf.ce_markets (
+                market_id, market_src_id, market_name,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_market_id'),
+                COALESCE(v_row.market_name, 'n.a.'),
+                COALESCE(v_row.market_name, 'n.a.'),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_markets');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.5 CE_REGIONS
 -- region_src_id = region_name || '_' || market_name (globally unique composite key)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_regions (
-    region_id BIGINT NOT NULL PRIMARY KEY,
-    region_src_id VARCHAR(255) NOT NULL UNIQUE,
-    region_name VARCHAR(100) NOT NULL,
-    market_id BIGINT NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_region_to_market
-        FOREIGN KEY (market_id)
-        REFERENCES bl_3nf.ce_markets(market_id)
-);
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_regions()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc   CONSTANT VARCHAR := 'bl_cl.prc_load_regions';
+    v_count  INTEGER := 0;
+    v_row    RECORD;
+    v_mkt_id BIGINT;
+    v_src_id VARCHAR(255);
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT
+            TRIM(region)::VARCHAR(100) AS region_name,
+            TRIM(market)::VARCHAR(50)  AS market_name
+        FROM sa_domestic.src_domestic_sales
+        WHERE region IS NOT NULL AND TRIM(region) != ''
+        UNION
+        SELECT DISTINCT
+            TRIM(region)::VARCHAR(100),
+            TRIM(market)::VARCHAR(50)
+        FROM sa_international.src_international_sales
+        WHERE region IS NOT NULL AND TRIM(region) != ''
+    LOOP
+        v_src_id := v_row.region_name || '_' || v_row.market_name;
 
--- CE_COUNTRIES (SCD Type 1 - geography hierarchy level 3)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_countries (
-    country_id BIGINT NOT NULL PRIMARY KEY,
-    country_src_id VARCHAR(100) NOT NULL UNIQUE,
-    country_name VARCHAR(100) NOT NULL,
-    region_id BIGINT NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_country_to_region
-        FOREIGN KEY (region_id)
-        REFERENCES bl_3nf.ce_regions(region_id)
-);
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_regions WHERE region_src_id = v_src_id
+        ) THEN
+            SELECT COALESCE(market_id, -1)
+            INTO v_mkt_id
+            FROM bl_3nf.ce_markets
+            WHERE market_src_id = v_row.market_name;
 
--- CE_STATES (SCD Type 1 - geography hierarchy level 4)
--- state_src_id = state_name || '_' || country_name (globally unique)
--- Domestic rows: state_name = 'N/A'
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_states (
-    state_id BIGINT NOT NULL PRIMARY KEY,
-    state_src_id VARCHAR(255) NOT NULL UNIQUE,
-    state_name VARCHAR(100) NOT NULL,
-    country_id BIGINT NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_state_to_country
-        FOREIGN KEY (country_id)
-        REFERENCES bl_3nf.ce_countries(country_id)
-);
+            INSERT INTO bl_3nf.ce_regions (
+                region_id, region_src_id, region_name, market_id,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_region_id'),
+                v_src_id,
+                COALESCE(v_row.region_name, 'n.a.'),
+                COALESCE(v_mkt_id, -1),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
 
--- CE_CITIES (SCD Type 1 - geography hierarchy level 5, leaf)
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_regions');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.6 CE_COUNTRIES
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_countries()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc   CONSTANT VARCHAR := 'bl_cl.prc_load_countries';
+    v_count  INTEGER := 0;
+    v_row    RECORD;
+    v_reg_id BIGINT;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT ON (country_name)
+            country_name, region_name, market_name
+        FROM (
+            SELECT DISTINCT
+                TRIM(country)::VARCHAR(100) AS country_name,
+                TRIM(region)::VARCHAR(100)  AS region_name,
+                TRIM(market)::VARCHAR(50)   AS market_name
+            FROM sa_domestic.src_domestic_sales
+            WHERE country IS NOT NULL AND TRIM(country) != ''
+            UNION
+            SELECT DISTINCT
+                TRIM(country)::VARCHAR(100),
+                TRIM(region)::VARCHAR(100),
+                TRIM(market)::VARCHAR(50)
+            FROM sa_international.src_international_sales
+            WHERE country IS NOT NULL AND TRIM(country) != ''
+        ) all_countries
+        ORDER BY country_name
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_countries WHERE country_src_id = v_row.country_name
+        ) THEN
+            SELECT COALESCE(region_id, -1)
+            INTO v_reg_id
+            FROM bl_3nf.ce_regions
+            WHERE region_src_id = (v_row.region_name || '_' || v_row.market_name);
+
+            INSERT INTO bl_3nf.ce_countries (
+                country_id, country_src_id, country_name, region_id,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_country_id'),
+                COALESCE(v_row.country_name, 'n.a.'),
+                COALESCE(v_row.country_name, 'n.a.'),
+                COALESCE(v_reg_id, -1),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_countries');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.7 CE_STATES
+-- Domestic rows produce state_name = 'N/A' (no state column in domestic source).
+-- state_src_id = state_name || '_' || country_name (globally unique composite key).
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_states()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc   CONSTANT VARCHAR := 'bl_cl.prc_load_states';
+    v_count  INTEGER := 0;
+    v_row    RECORD;
+    v_cty_id BIGINT;
+    v_src_id VARCHAR(255);
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT
+            'N/A'::VARCHAR(100)         AS state_name,
+            TRIM(country)::VARCHAR(100) AS country_name
+        FROM sa_domestic.src_domestic_sales
+        WHERE country IS NOT NULL AND TRIM(country) != ''
+        UNION
+        SELECT DISTINCT
+            TRIM(state)::VARCHAR(100)   AS state_name,
+            TRIM(country)::VARCHAR(100) AS country_name
+        FROM sa_international.src_international_sales
+        WHERE state IS NOT NULL AND TRIM(state) != ''
+    LOOP
+        v_src_id := v_row.state_name || '_' || v_row.country_name;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_states WHERE state_src_id = v_src_id
+        ) THEN
+            SELECT COALESCE(country_id, -1)
+            INTO v_cty_id
+            FROM bl_3nf.ce_countries
+            WHERE country_src_id = v_row.country_name;
+
+            INSERT INTO bl_3nf.ce_states (
+                state_id, state_src_id, state_name, country_id,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_state_id'),
+                v_src_id,
+                COALESCE(v_row.state_name, 'n.a.'),
+                COALESCE(v_cty_id, -1),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_states');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.8 CE_CITIES
 -- city_src_id = city || '_' || country || '_' || region (composite natural key)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_cities (
-    city_id BIGINT NOT NULL PRIMARY KEY,
-    city_src_id VARCHAR(255) NOT NULL UNIQUE,
-    city_name VARCHAR(100) NOT NULL,
-    state_id BIGINT NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_city_to_state
-        FOREIGN KEY (state_id)
-        REFERENCES bl_3nf.ce_states(state_id)
-);
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_cities()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_cities';
+    v_count INTEGER := 0;
+    v_row   RECORD;
+    v_st_id BIGINT;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT ON (city_key)
+            city_key, city_name, state_name, country_name
+        FROM (
+            SELECT DISTINCT
+                TRIM(city)::VARCHAR(100) || '_' ||
+                TRIM(country)::VARCHAR(100) || '_' ||
+                TRIM(region)::VARCHAR(100)  AS city_key,
+                TRIM(city)::VARCHAR(100)    AS city_name,
+                'N/A'::VARCHAR(100)         AS state_name,
+                TRIM(country)::VARCHAR(100) AS country_name
+            FROM sa_domestic.src_domestic_sales
+            WHERE city IS NOT NULL AND TRIM(city) != ''
+            UNION ALL
+            SELECT DISTINCT
+                TRIM(city)::VARCHAR(100) || '_' ||
+                TRIM(country)::VARCHAR(100) || '_' ||
+                TRIM(region)::VARCHAR(100)  AS city_key,
+                TRIM(city)::VARCHAR(100)    AS city_name,
+                COALESCE(NULLIF(TRIM(state), ''), 'N/A')::VARCHAR(100) AS state_name,
+                TRIM(country)::VARCHAR(100) AS country_name
+            FROM sa_international.src_international_sales
+            WHERE city IS NOT NULL AND TRIM(city) != ''
+        ) all_cities
+        ORDER BY city_key
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_cities WHERE city_src_id = v_row.city_key
+        ) THEN
+            SELECT COALESCE(state_id, -1)
+            INTO v_st_id
+            FROM bl_3nf.ce_states
+            WHERE state_src_id = (v_row.state_name || '_' || v_row.country_name);
 
--- CE_CUSTOMERS_SCD (SCD Type 2 - tracks historical changes to customer_segment)
--- Composite PK: (customer_id, start_dt) per SCD2 convention on 3NF layer.
--- No FK database constraint from fact table to this table (SCD2 rule).
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_customers_scd (
-    customer_id BIGINT NOT NULL,
-    customer_src_id VARCHAR(100) NOT NULL,
-    customer_name VARCHAR(255) NOT NULL,
-    customer_segment VARCHAR(50) NOT NULL,
-    start_dt DATE NOT NULL,
-    end_dt DATE NOT NULL,
-    is_active VARCHAR(1) NOT NULL,
-    insert_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    PRIMARY KEY (customer_id, start_dt)
-);
+            INSERT INTO bl_3nf.ce_cities (
+                city_id, city_src_id, city_name, state_id,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_city_id'),
+                COALESCE(v_row.city_key, 'n.a.'),
+                COALESCE(v_row.city_name, 'n.a.'),
+                COALESCE(v_st_id, -1),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
 
-CREATE INDEX IF NOT EXISTS idx_ce_customers_scd_src_id
-    ON bl_3nf.ce_customers_scd(customer_src_id);
-CREATE INDEX IF NOT EXISTS idx_ce_customers_scd_active
-    ON bl_3nf.ce_customers_scd(is_active, end_dt);
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_cities');
 
--- CE_EMPLOYEES (SCD Type 1 - conformed across both sources)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_employees (
-    employee_id BIGINT NOT NULL PRIMARY KEY,
-    employee_src_id VARCHAR(50) NOT NULL UNIQUE,
-    employee_name VARCHAR(255) NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL
-);
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
 
--- CE_ORDER_ATTRIBUTES (SCD Type 0 - junk dimension)
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_order_attributes (
-    order_attr_id BIGINT NOT NULL PRIMARY KEY,
-    ship_mode VARCHAR(50) NOT NULL,
-    order_priority VARCHAR(25) NOT NULL,
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    UNIQUE (ship_mode, order_priority)
-);
 
--- CE_SALES (fact table at 3NF level - transaction grain)
--- KPI columns are the ONLY nullable columns.
--- No FK to CE_CUSTOMERS_SCD (SCD2 composite PK, logical FK only).
-CREATE TABLE IF NOT EXISTS bl_3nf.ce_sales (
-    event_dt DATE NOT NULL,
-    date_id INTEGER NOT NULL,
-    product_id BIGINT NOT NULL,
-    customer_id BIGINT NOT NULL,
-    city_id BIGINT NOT NULL,
-    employee_id BIGINT NOT NULL,
-    order_attr_id BIGINT NOT NULL,
-    order_id VARCHAR(50) NOT NULL,
-    sales_amt NUMERIC(15,2),
-    cost_amt NUMERIC(15,2),
-    profit_amt NUMERIC(15,2),
-    shipping_cost_amt NUMERIC(15,2),
-    quantity_cnt NUMERIC(10,0),
-    discount_amt NUMERIC(5,4),
-    insert_dt DATE NOT NULL,
-    update_dt DATE NOT NULL,
-    source_system VARCHAR(100) NOT NULL,
-    source_entity VARCHAR(100) NOT NULL,
-    CONSTRAINT fk_sales_to_date
-        FOREIGN KEY (date_id)
-        REFERENCES bl_3nf.ce_dates(date_id),
-    CONSTRAINT fk_sales_to_product
-        FOREIGN KEY (product_id)
-        REFERENCES bl_3nf.ce_products(product_id),
-    CONSTRAINT fk_sales_to_employee
-        FOREIGN KEY (employee_id)
-        REFERENCES bl_3nf.ce_employees(employee_id),
-    CONSTRAINT fk_sales_to_city
-        FOREIGN KEY (city_id)
-        REFERENCES bl_3nf.ce_cities(city_id),
-    CONSTRAINT fk_sales_to_order_attr
-        FOREIGN KEY (order_attr_id)
-        REFERENCES bl_3nf.ce_order_attributes(order_attr_id)
-);
+-- 2.9 CE_CUSTOMERS_SCD (SCD Type 2)
+-- FIXED: includes full SCD2 versioning logic per mentor feedback.
+-- Three cases handled:
+--   A) New customer (never seen before)   -> insert first active version
+--   B) Existing customer, attribute changed -> expire old row, insert new version
+--   C) Existing customer, no change       -> skip
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_customers_scd()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc          CONSTANT VARCHAR := 'bl_cl.prc_load_customers_scd';
+    v_count_new     INTEGER := 0;
+    v_count_scd     INTEGER := 0;
+    v_row           RECORD;
+    v_existing_seg  VARCHAR(50);
+    v_existing_name VARCHAR(255);
+    v_old_start_dt  DATE;
+    v_new_end_dt    DATE;
+BEGIN
+    FOR v_row IN
+        SELECT customer_src_id, customer_name, customer_segment,
+               source_system, source_entity
+        FROM (
+            SELECT DISTINCT ON (customer_id)
+                customer_id        AS customer_src_id,
+                customer_name,
+                segment            AS customer_segment,
+                'SA_DOMESTIC'      AS source_system,
+                'SRC_DOMESTIC_SALES' AS source_entity
+            FROM sa_domestic.src_domestic_sales
+            WHERE customer_id IS NOT NULL AND TRIM(customer_id) != ''
+            ORDER BY customer_id, customer_name
 
-CREATE INDEX IF NOT EXISTS idx_ce_sales_event_dt ON bl_3nf.ce_sales(event_dt);
-CREATE INDEX IF NOT EXISTS idx_ce_sales_product_id ON bl_3nf.ce_sales(product_id);
-CREATE INDEX IF NOT EXISTS idx_ce_sales_customer_id ON bl_3nf.ce_sales(customer_id);
-CREATE INDEX IF NOT EXISTS idx_ce_sales_city_id ON bl_3nf.ce_sales(city_id);
-CREATE INDEX IF NOT EXISTS idx_ce_sales_employee_id ON bl_3nf.ce_sales(employee_id);
-CREATE INDEX IF NOT EXISTS idx_ce_sales_order_id ON bl_3nf.ce_sales(order_id);
-CREATE INDEX IF NOT EXISTS idx_ce_sales_dedupe_key
-    ON bl_3nf.ce_sales (order_id, product_id, customer_id, event_dt, source_system);
+            UNION ALL
 
--- STEP 3: Populate CE_DATES for full 2024-2025 range
--- Generates one row per calendar day. ON CONFLICT DO NOTHING = safe to re-run.
+            SELECT DISTINCT ON (customer_id)
+                customer_id            AS customer_src_id,
+                customer_name,
+                segment                AS customer_segment,
+                'SA_INTERNATIONAL'     AS source_system,
+                'SRC_INTERNATIONAL_SALES' AS source_entity
+            FROM sa_international.src_international_sales
+            WHERE customer_id IS NOT NULL AND TRIM(customer_id) != ''
+            ORDER BY customer_id, customer_name
+        ) combined
+    LOOP
+        -- Check if this customer already has an active row in CE_CUSTOMERS_SCD
+        SELECT customer_segment, customer_name
+        INTO   v_existing_seg, v_existing_name
+        FROM   bl_3nf.ce_customers_scd
+        WHERE  customer_src_id = v_row.customer_src_id
+          AND  is_active = 'Y';
+
+        IF NOT FOUND THEN
+            -- CASE A: brand new customer — insert first version
+            INSERT INTO bl_3nf.ce_customers_scd (
+                customer_id, customer_src_id, customer_name, customer_segment,
+                start_dt, end_dt, is_active, insert_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_customer_id'),
+                v_row.customer_src_id,
+                COALESCE(v_row.customer_name,    'n.a.'),
+                COALESCE(v_row.customer_segment, 'n.a.'),
+                '1990-01-01'::DATE,
+                '9999-12-31'::DATE,
+                'Y',
+                CURRENT_DATE,
+                v_row.source_system,
+                v_row.source_entity
+            );
+            v_count_new := v_count_new + 1;
+
+        ELSIF v_existing_seg  IS DISTINCT FROM v_row.customer_segment
+           OR v_existing_name IS DISTINCT FROM v_row.customer_name THEN
+            -- CASE B: attribute changed — SCD2 versioning
+
+            -- Get start_dt of the row about to be expired
+            SELECT start_dt INTO v_old_start_dt
+            FROM   bl_3nf.ce_customers_scd
+            WHERE  customer_src_id = v_row.customer_src_id AND is_active = 'Y';
+
+            -- end_dt must be strictly > start_dt
+            v_new_end_dt := GREATEST(v_old_start_dt + 1, CURRENT_DATE);
+
+            -- Expire the current active row
+            UPDATE bl_3nf.ce_customers_scd
+            SET    end_dt    = v_new_end_dt,
+                   is_active = 'N'
+            WHERE  customer_src_id = v_row.customer_src_id
+              AND  is_active = 'Y';
+
+            -- Insert the new active version
+            INSERT INTO bl_3nf.ce_customers_scd (
+                customer_id, customer_src_id, customer_name, customer_segment,
+                start_dt, end_dt, is_active, insert_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_customer_id'),
+                v_row.customer_src_id,
+                COALESCE(v_row.customer_name,    'n.a.'),
+                COALESCE(v_row.customer_segment, 'n.a.'),
+                v_new_end_dt + 1,
+                '9999-12-31'::DATE,
+                'Y',
+                CURRENT_DATE,
+                v_row.source_system,
+                v_row.source_entity
+            );
+            v_count_scd := v_count_scd + 1;
+
+        -- CASE C: no change — do nothing
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count_new + v_count_scd, 'SUCCESS',
+        'CE_CUSTOMERS_SCD: ' || v_count_new || ' new inserts, '
+        || v_count_scd || ' SCD2 version changes');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.10 CE_EMPLOYEES
+-- Domestic gives employee_id + employee_name.
+-- International gives employee_id only (name = 'n.a.').
+-- DISTINCT ON ordered by employee_name NULLS LAST keeps the domestic row
+-- (with name) when the same employee appears in both sources.
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_employees()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_employees';
+    v_count INTEGER := 0;
+    v_row   RECORD;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT ON (employee_src_id)
+            employee_src_id, employee_name
+        FROM (
+            SELECT DISTINCT
+                TRIM(employee_id)::VARCHAR(50)   AS employee_src_id,
+                TRIM(employee_name)::VARCHAR(255) AS employee_name
+            FROM sa_domestic.src_domestic_sales
+            WHERE employee_id IS NOT NULL AND TRIM(employee_id) != ''
+            UNION ALL
+            SELECT DISTINCT
+                TRIM(employee_id)::VARCHAR(50),
+                NULL::VARCHAR(255)
+            FROM sa_international.src_international_sales
+            WHERE employee_id IS NOT NULL AND TRIM(employee_id) != ''
+        ) all_employees
+        ORDER BY employee_src_id, employee_name NULLS LAST
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_employees WHERE employee_src_id = v_row.employee_src_id
+        ) THEN
+            INSERT INTO bl_3nf.ce_employees (
+                employee_id, employee_src_id, employee_name,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_employee_id'),
+                COALESCE(v_row.employee_src_id, 'n.a.'),
+                COALESCE(v_row.employee_name,   'n.a.'),
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_COMBINED',
+                'SRC_DOMESTIC_SALES,SRC_INTERNATIONAL_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_employees');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- 2.11 CE_ORDER_ATTRIBUTES (junk dimension)
+-- Only from Domestic source. International rows reference the -1 default row.
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_order_attributes()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_order_attributes';
+    v_count INTEGER := 0;
+    v_row   RECORD;
+BEGIN
+    FOR v_row IN
+        SELECT DISTINCT
+            COALESCE(NULLIF(TRIM(ship_mode),      ''), 'n.a.')::VARCHAR(50) AS ship_mode,
+            COALESCE(NULLIF(TRIM(order_priority), ''), 'n.a.')::VARCHAR(25) AS order_priority
+        FROM sa_domestic.src_domestic_sales
+        WHERE ship_mode IS NOT NULL AND order_priority IS NOT NULL
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM bl_3nf.ce_order_attributes
+            WHERE ship_mode = v_row.ship_mode AND order_priority = v_row.order_priority
+        ) THEN
+            INSERT INTO bl_3nf.ce_order_attributes (
+                order_attr_id, ship_mode, order_priority,
+                insert_dt, update_dt, source_system, source_entity
+            )
+            VALUES (
+                nextval('bl_3nf.seq_order_attr_id'),
+                v_row.ship_mode,
+                v_row.order_priority,
+                CURRENT_DATE, CURRENT_DATE,
+                'SA_DOMESTIC',
+                'SRC_DOMESTIC_SALES'
+            );
+            v_count := v_count + 1;
+        END IF;
+    END LOOP;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into bl_3nf.ce_order_attributes');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- SECTION 3: MASTER PROCEDURE FOR ALL 3NF DIMENSIONS
+-- Calls all dimension procedures in FK dependency order.
+-- If any procedure fails, the EXCEPTION block logs the error and re-raises,
+-- stopping the master procedure immediately.
 -----------------------------------------------------------------------------
-INSERT INTO bl_3nf.ce_dates (
-    date_id, date_dt, day_of_week_no, day_of_week_desc, weekend_flag,
-    iso_week_no, day_of_month_no, month_value, month_desc,
-    quarter_value, quarter_desc, year_value, insert_dt, update_dt
-)
-SELECT
-    TO_CHAR(d, 'YYYYMMDD')::INTEGER AS date_id,
-    d AS date_dt,
-    EXTRACT(ISODOW FROM d)::INTEGER AS day_of_week_no,
-    TRIM(TO_CHAR(d, 'Day')) AS day_of_week_desc,
-    CASE WHEN EXTRACT(ISODOW FROM d) IN (6, 7) THEN 1 ELSE 0 END AS weekend_flag,
-    EXTRACT(WEEK FROM d)::INTEGER AS iso_week_no,
-    EXTRACT(DAY FROM d)::INTEGER AS day_of_month_no,
-    TO_CHAR(d, 'MM') AS month_value,
-    TRIM(TO_CHAR(d, 'Month')) AS month_desc,
-    TRIM(TO_CHAR(EXTRACT(QUARTER FROM d)::INTEGER, '9')) AS quarter_value,
-    'Q' || EXTRACT(QUARTER FROM d)::INTEGER AS quarter_desc,
-    TO_CHAR(d, 'YYYY') AS year_value,
-    CURRENT_DATE AS insert_dt,
-    CURRENT_DATE AS update_dt
-FROM GENERATE_SERIES('2024-01-01'::DATE, '2025-12-31'::DATE, '1 day'::INTERVAL) AS d
-ON CONFLICT (date_id) DO NOTHING;
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_all_3nf()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_all_3nf';
+BEGIN
+    RAISE NOTICE '% started at %', v_proc, NOW();
 
-COMMIT;
+    CALL bl_cl.prc_load_product_categories();
+    CALL bl_cl.prc_load_product_subcategories();
+    CALL bl_cl.prc_load_products();
+    CALL bl_cl.prc_load_markets();
+    CALL bl_cl.prc_load_regions();
+    CALL bl_cl.prc_load_countries();
+    CALL bl_cl.prc_load_states();
+    CALL bl_cl.prc_load_cities();
+    CALL bl_cl.prc_load_customers_scd();
+    CALL bl_cl.prc_load_employees();
+    CALL bl_cl.prc_load_order_attributes();
 
--- STEP 4: Insert default (-1) rows into all dimension tables
--- COALESCE(NULL, 'n.a.') used explicitly on all text fields to demonstrate
--- NULL handling per naming conventions requirement.
--- ON CONFLICT DO NOTHING = safe to re-run.
+    CALL bl_cl.prc_log(v_proc, 0, 'SUCCESS',
+        'All 3NF dimension procedures completed successfully');
+
+    RAISE NOTICE '% finished at %', v_proc, NOW();
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'Master 3NF procedure failed: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- SECTION 4: PERFORMANCE INDEXES (run before fact load)
 -----------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_src_dom_product_id   ON sa_domestic.src_domestic_sales(product_id);
+CREATE INDEX IF NOT EXISTS idx_src_dom_customer_id  ON sa_domestic.src_domestic_sales(customer_id);
+CREATE INDEX IF NOT EXISTS idx_src_dom_employee_id  ON sa_domestic.src_domestic_sales(employee_id);
+CREATE INDEX IF NOT EXISTS idx_src_intl_product_id  ON sa_international.src_international_sales(product_id);
+CREATE INDEX IF NOT EXISTS idx_src_intl_customer_id ON sa_international.src_international_sales(customer_id);
+CREATE INDEX IF NOT EXISTS idx_src_intl_employee_id ON sa_international.src_international_sales(employee_id);
 
--- CE_DATES default row
-INSERT INTO bl_3nf.ce_dates (
-    date_id, date_dt, day_of_week_no, day_of_week_desc, weekend_flag,
-    iso_week_no, day_of_month_no, month_value, month_desc,
-    quarter_value, quarter_desc, year_value, insert_dt, update_dt
-)
-VALUES (
-    -1, '1900-01-01'::DATE, -1,
-    COALESCE(NULL, 'n.a.'), -1, -1, -1,
-    COALESCE(NULL, 'n.'),
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n'),
-    COALESCE(NULL, 'n.'),
-    COALESCE(NULL, 'n.a.'),
-    '1900-01-01'::DATE, '1900-01-01'::DATE
-)
-ON CONFLICT (date_id) DO NOTHING;
-COMMIT;
+ANALYZE sa_domestic.src_domestic_sales;
+ANALYZE sa_international.src_international_sales;
+ANALYZE bl_3nf.ce_dates;
+ANALYZE bl_3nf.ce_products;
+ANALYZE bl_3nf.ce_customers_scd;
+ANALYZE bl_3nf.ce_cities;
+ANALYZE bl_3nf.ce_employees;
+ANALYZE bl_3nf.ce_order_attributes;
 
--- CE_PRODUCT_CATEGORIES default row
-INSERT INTO bl_3nf.ce_product_categories (
-    product_category_id, product_category_src_id, product_category_name,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (product_category_id) DO NOTHING;
-COMMIT;
 
--- CE_PRODUCT_SUBCATEGORIES default row
-INSERT INTO bl_3nf.ce_product_subcategories (
-    product_subcategory_id, product_subcategory_src_id, product_subcategory_name,
-    product_category_id, insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    -1,
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (product_subcategory_id) DO NOTHING;
-COMMIT;
-
--- CE_PRODUCTS default row
-INSERT INTO bl_3nf.ce_products (
-    product_id, product_src_id, product_name, product_subcategory_id,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    -1,
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (product_id) DO NOTHING;
-COMMIT;
-
--- CE_MARKETS default row
-INSERT INTO bl_3nf.ce_markets (
-    market_id, market_src_id, market_name,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (market_id) DO NOTHING;
-COMMIT;
-
--- CE_REGIONS default row
-INSERT INTO bl_3nf.ce_regions (
-    region_id, region_src_id, region_name, market_id,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    -1,
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (region_id) DO NOTHING;
-COMMIT;
-
--- CE_COUNTRIES default row
-INSERT INTO bl_3nf.ce_countries (
-    country_id, country_src_id, country_name, region_id,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    -1,
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (country_id) DO NOTHING;
-COMMIT;
-
--- CE_STATES default row
-INSERT INTO bl_3nf.ce_states (
-    state_id, state_src_id, state_name, country_id,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    -1,
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (state_id) DO NOTHING;
-COMMIT;
-
--- CE_CITIES default row
-INSERT INTO bl_3nf.ce_cities (
-    city_id, city_src_id, city_name, state_id,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    -1,
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (city_id) DO NOTHING;
-COMMIT;
-
--- CE_CUSTOMERS_SCD default row (SCD Type 2)
-INSERT INTO bl_3nf.ce_customers_scd (
-    customer_id, customer_src_id, customer_name, customer_segment,
-    start_dt, end_dt, is_active, insert_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    '1900-01-01'::DATE, '9999-12-31'::DATE, 'Y',
-    '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (customer_id, start_dt) DO NOTHING;
-COMMIT;
-
--- CE_EMPLOYEES default row
-INSERT INTO bl_3nf.ce_employees (
-    employee_id, employee_src_id, employee_name,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (employee_id) DO NOTHING;
-COMMIT;
-
--- CE_ORDER_ATTRIBUTES default row (junk dimension, SCD Type 0)
-INSERT INTO bl_3nf.ce_order_attributes (
-    order_attr_id, ship_mode, order_priority,
-    insert_dt, update_dt, source_system, source_entity
-)
-VALUES (
-    -1,
-    COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n.a.'),
-    '1900-01-01'::DATE, '1900-01-01'::DATE,
-    COALESCE(NULL, 'MANUAL'),
-    COALESCE(NULL, 'MANUAL')
-)
-ON CONFLICT (order_attr_id) DO NOTHING;
-COMMIT;
-
--- STEP 5: Verify default rows are present in all dimension tables
--- Every table below must return count = 1
+-- SECTION 5: RUN + VERIFY
 -----------------------------------------------------------------------------
+CALL bl_cl.prc_load_all_3nf();
+
+SELECT procedure_name, rows_affected, status, log_message, log_dt
+FROM bl_cl.mta_load_log
+ORDER BY log_dt DESC, log_id DESC
+LIMIT 15;
+
 SELECT 
-    'CE_DATES' AS table_name, 
-    COUNT(*) AS default_row_count 
-FROM bl_3nf.ce_dates 
-WHERE date_id = -1
-UNION ALL
-SELECT 
-    'CE_PRODUCT_CATEGORIES', 
-    COUNT(*) 
+    'CE_PRODUCT_CATEGORIES' AS table_name, 
+    COUNT(*) AS default_rows 
 FROM bl_3nf.ce_product_categories 
 WHERE product_category_id = -1
 UNION ALL

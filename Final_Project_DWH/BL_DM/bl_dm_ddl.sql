@@ -1,6 +1,6 @@
 -- BL_DM DDL: Dimensional Layer Tables, Sequences, Default Rows, DIM_TIME_DAY population
--- Global Retail Superstore Sales
--- Tamar Tutisani
+-- Global Retail Superstore Sales | Tamar Tutisani
+-- Run this SIXTH, after bl_3nf_dml.sql.
 --
 -- DDL DESIGN NOTE:
 -- Using CREATE TABLE IF NOT EXISTS instead of DROP TABLE IF EXISTS CASCADE.
@@ -30,9 +30,9 @@ CREATE SCHEMA IF NOT EXISTS bl_dm;
 -- DIM_TIME_DAY uses YYYYMMDD integer keys — no sequence needed.
 -----------------------------------------------------------------------------
 CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_product_surr_id    START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_customer_surr_id   START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_geography_surr_id  START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_employee_surr_id   START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_customer_surr_id    START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_geography_surr_id   START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_employee_surr_id    START 100 INCREMENT 1;
 CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_order_attr_surr_id START 100 INCREMENT 1;
 
 
@@ -47,20 +47,20 @@ CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_order_attr_surr_id START 100 INCREMENT 1
 -- month_value/quarter_value are VARCHAR(5) to accommodate both real values
 -- (2 chars) and the 'n.a.' default placeholder without truncation.
 CREATE TABLE IF NOT EXISTS bl_dm.dim_time_day (
-    date_id          INTEGER      NOT NULL PRIMARY KEY,
-    date_dt          DATE         NOT NULL,
-    day_of_week_no   INTEGER      NOT NULL CHECK (day_of_week_no BETWEEN -1 AND 7),
-    day_of_week_desc VARCHAR(25)  NOT NULL,
-    weekend_flag     INTEGER      NOT NULL CHECK (weekend_flag IN (-1, 0, 1)),
-    iso_week_no      INTEGER      NOT NULL,
-    day_of_month_no  INTEGER      NOT NULL,
-    month_value      VARCHAR(5)   NOT NULL,
-    month_desc       VARCHAR(25)  NOT NULL,
-    quarter_value    VARCHAR(5)   NOT NULL,
-    quarter_desc     VARCHAR(5)   NOT NULL,
-    year_value       VARCHAR(4)   NOT NULL,
-    insert_dt        DATE         NOT NULL,
-    update_dt        DATE         NOT NULL
+    date_id            INTEGER     NOT NULL PRIMARY KEY,
+    date_dt            DATE        NOT NULL,
+    day_of_week_no     INTEGER     NOT NULL CHECK (day_of_week_no BETWEEN -1 AND 7),
+    day_of_week_desc   VARCHAR(25) NOT NULL,
+    weekend_flag       INTEGER     NOT NULL CHECK (weekend_flag IN (-1, 0, 1)),
+    iso_week_no        INTEGER     NOT NULL,
+    day_of_month_no    INTEGER     NOT NULL,
+    month_value        VARCHAR(5)  NOT NULL,
+    month_desc         VARCHAR(25) NOT NULL,
+    quarter_value      VARCHAR(5)  NOT NULL,
+    quarter_desc       VARCHAR(5)  NOT NULL,
+    year_value         VARCHAR(4)  NOT NULL,
+    insert_dt          DATE        NOT NULL,
+    update_dt          DATE        NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_time_day_date_dt
@@ -161,25 +161,25 @@ CREATE TABLE IF NOT EXISTS bl_dm.dim_order_attributes (
 -- Partitioned by RANGE on event_dt — one partition per month.
 -- Partitions are created and attached by the rolling-window load procedure.
 CREATE TABLE IF NOT EXISTS bl_dm.fct_sales_dd (
-    event_dt           DATE         NOT NULL,
-    date_id            INTEGER      NOT NULL,
-    product_surr_id    BIGINT       NOT NULL,
-    customer_surr_id   BIGINT       NOT NULL,
-    geography_surr_id  BIGINT       NOT NULL,
-    employee_surr_id   BIGINT       NOT NULL,
-    order_attr_surr_id BIGINT       NOT NULL,
-    order_id           VARCHAR(50)  NOT NULL,
-    sales_amt          NUMERIC(15,2),
-    cost_amt           NUMERIC(15,2),
-    profit_amt         NUMERIC(15,2),
-    shipping_cost_amt  NUMERIC(15,2),
-    quantity_cnt       NUMERIC(10,0),
-    discount_amt       NUMERIC(5,4),
-    profit_margin_amt  NUMERIC(10,4),
-    insert_dt          DATE         NOT NULL,
-    update_dt          DATE         NOT NULL,
-    source_system      VARCHAR(100) NOT NULL,
-    source_entity      VARCHAR(100) NOT NULL,
+    event_dt             DATE         NOT NULL,
+    date_id              INTEGER      NOT NULL,
+    product_surr_id      BIGINT       NOT NULL,
+    customer_surr_id     BIGINT       NOT NULL,
+    geography_surr_id    BIGINT       NOT NULL,
+    employee_surr_id     BIGINT       NOT NULL,
+    order_attr_surr_id   BIGINT       NOT NULL,
+    order_id             VARCHAR(50)  NOT NULL,
+    sales_amt            NUMERIC(15,2),
+    cost_amt             NUMERIC(15,2),
+    profit_amt           NUMERIC(15,2),
+    shipping_cost_amt    NUMERIC(15,2),
+    quantity_cnt         NUMERIC(10,0),
+    discount_amt         NUMERIC(5,4),
+    profit_margin_amt    NUMERIC(10,4),
+    insert_dt            DATE         NOT NULL,
+    update_dt            DATE         NOT NULL,
+    source_system        VARCHAR(100) NOT NULL,
+    source_entity        VARCHAR(100) NOT NULL,
     CONSTRAINT fk_fct_sales_to_time
         FOREIGN KEY (date_id)
         REFERENCES bl_dm.dim_time_day(date_id),
@@ -370,19 +370,38 @@ COMMIT;
 
 -- STEP 5: Verify default rows and table structure
 -----------------------------------------------------------------------------
-SELECT table_schema, table_name, table_type
-FROM information_schema.tables
-WHERE table_schema = 'bl_dm'
-ORDER BY table_name;
-
-SELECT 'DIM_TIME_DAY'        AS table_name, COUNT(*) AS default_row_count FROM bl_dm.dim_time_day        WHERE date_id = -1
+SELECT 
+    'DIM_TIME_DAY' AS table_name, 
+    COUNT(*) AS default_row_count 
+FROM bl_dm.dim_time_day 
+WHERE date_id = -1
 UNION ALL
-SELECT 'DIM_PRODUCTS',        COUNT(*) FROM bl_dm.dim_products        WHERE product_surr_id = -1
+SELECT 
+    'DIM_PRODUCTS', 
+    COUNT(*) 
+FROM bl_dm.dim_products 
+WHERE product_surr_id = -1
 UNION ALL
-SELECT 'DIM_CUSTOMERS_SCD',   COUNT(*) FROM bl_dm.dim_customers_scd   WHERE customer_surr_id = -1
+SELECT 
+    'DIM_CUSTOMERS_SCD', 
+    COUNT(*) 
+FROM bl_dm.dim_customers_scd 
+WHERE customer_surr_id = -1
 UNION ALL
-SELECT 'DIM_GEOGRAPHY',       COUNT(*) FROM bl_dm.dim_geography        WHERE geography_surr_id = -1
+SELECT 
+    'DIM_GEOGRAPHY', 
+    COUNT(*) 
+FROM bl_dm.dim_geography 
+WHERE geography_surr_id = -1
 UNION ALL
-SELECT 'DIM_EMPLOYEES',       COUNT(*) FROM bl_dm.dim_employees        WHERE employee_surr_id = -1
+SELECT 
+    'DIM_EMPLOYEES', 
+    COUNT(*) 
+FROM bl_dm.dim_employees 
+WHERE employee_surr_id = -1
 UNION ALL
-SELECT 'DIM_ORDER_ATTRIBUTES',COUNT(*) FROM bl_dm.dim_order_attributes WHERE order_attr_surr_id = -1;
+SELECT 
+    'DIM_ORDER_ATTRIBUTES', 
+    COUNT(*) 
+FROM bl_dm.dim_order_attributes 
+WHERE order_attr_surr_id = -1;

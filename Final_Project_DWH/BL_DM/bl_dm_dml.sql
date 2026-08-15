@@ -33,7 +33,7 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA bl_dm TO bl_cl_role;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type t
-                   JOIN pg_namespace n ON n.oid = t.typnamespace
+                   INNER JOIN pg_namespace n ON n.oid = t.typnamespace
                    WHERE t.typname = 't_dim_product_row' AND n.nspname = 'bl_cl') THEN
         CREATE TYPE bl_cl.t_dim_product_row AS (
             product_src_id VARCHAR(50),
@@ -58,18 +58,18 @@ AS $$
 BEGIN
     RETURN QUERY
     SELECT
-        p.product_src_id,
-        p.product_name,
-        cat.product_category_id,
-        cat.product_category_name,
-        sub.product_subcategory_id,
-        sub.product_subcategory_name,
-        p.source_system,
-        p.source_entity
+        p.product_src_id::VARCHAR(50),
+        p.product_name::VARCHAR(255),
+        COALESCE(cat.product_category_id, -1)::BIGINT,
+        COALESCE(cat.product_category_name, 'n.a.')::VARCHAR(100),
+        COALESCE(sub.product_subcategory_id, -1)::BIGINT,
+        COALESCE(sub.product_subcategory_name, 'n.a.')::VARCHAR(100),
+        p.source_system::VARCHAR(100),
+        p.source_entity::VARCHAR(100)
     FROM bl_3nf.ce_products p
-    JOIN bl_3nf.ce_product_subcategories sub
+    LEFT JOIN bl_3nf.ce_product_subcategories sub
         ON sub.product_subcategory_id = p.product_subcategory_id
-    JOIN bl_3nf.ce_product_categories cat
+    LEFT JOIN bl_3nf.ce_product_categories cat
         ON cat.product_category_id = sub.product_category_id
     WHERE p.product_id != -1;
 END;
@@ -156,7 +156,7 @@ DECLARE
     v_old_start_dt DATE;
     v_new_end_dt DATE;
 BEGIN
-    -- Open explicit cursor (satisfies cursor variable requirement)
+    -- Open explicit cursor
     OPEN cur_customers FOR
         SELECT
             c.customer_src_id,
@@ -198,7 +198,7 @@ BEGIN
 
         ELSIF v_existing_seg IS DISTINCT FROM v_row.customer_segment
            OR v_existing_name IS DISTINCT FROM v_row.customer_name THEN
-            -- CASE B: attribute changed — SCD2 versioning
+            -- CASE B: attribute changed - SCD2 versioning
             DECLARE
                 v_inner_old_start DATE;
                 v_inner_new_end DATE;
@@ -293,17 +293,17 @@ BEGIN
         SELECT
             cty.city_src_id AS geography_src_id,
             cty.city_name,
-            st.state_name,
-            co.country_name,
-            re.region_name,
-            mk.market_name,
+            COALESCE(st.state_name, 'n.a.') AS state_name,
+            COALESCE(co.country_name, 'n.a.') AS country_name,
+            COALESCE(re.region_name, 'n.a.') AS region_name,
+            COALESCE(mk.market_name, 'n.a.') AS market_name,
             cty.source_system,
             cty.source_entity
         FROM bl_3nf.ce_cities cty
-        JOIN bl_3nf.ce_states st ON st.state_id = cty.state_id
-        JOIN bl_3nf.ce_countries co ON co.country_id = st.country_id
-        JOIN bl_3nf.ce_regions re ON re.region_id = co.region_id
-        JOIN bl_3nf.ce_markets mk ON mk.market_id = re.market_id
+        LEFT JOIN bl_3nf.ce_states st ON st.state_id = cty.state_id
+        LEFT JOIN bl_3nf.ce_countries co ON co.country_id = st.country_id
+        LEFT JOIN bl_3nf.ce_regions re ON re.region_id = co.region_id
+        LEFT JOIN bl_3nf.ce_markets mk ON mk.market_id = re.market_id
         WHERE cty.city_id != -1
     LOOP
         -- EXECUTE with USING: safe parameterized values (no SQL injection risk)
@@ -448,114 +448,153 @@ END;
 $$;
 
 
--- SECTION 4: FACT TABLE LOAD PROCEDURES
+-- SECTION 4: FACT TABLE LOAD PROCEDURES	
 -----------------------------------------------------------------------------
 
 -- 4.1 CE_SALES incremental load (3NF fact)
--- Uses MAX(event_dt) as high-water mark.
--- On first run: loads all rows (v_last_dt IS NULL).
--- On subsequent runs: loads only rows with event_dt > last loaded date.
--- Idempotency: WHERE NOT EXISTS on (order_id, event_dt, source_system).
+-- Two-layer incremental strategy:
+--   Layer 1 (date range): scans SRC for rows with order_date >= MAX(event_dt) - 30 days.
+--   Eliminates the bulk of already-loaded rows cheaply without touching CE_SALES.
+--   On first run v_last_dt IS NULL → full load of all SRC rows.
+--   Layer 2 (NOT EXISTS): within the surviving candidates, checks the business key
+--   (order_id, product_id, customer_id, event_dt, source_system) against CE_SALES.
+--   Catches duplicates inside the look-back window and late-arriving rows.
+--   Uses idx_ce_sales_dedupe_key for fast lookup.
 CREATE OR REPLACE PROCEDURE bl_cl.prc_load_ce_sales_incremental()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_ce_sales_incremental';
-    v_count INTEGER := 0;
+    v_proc    CONSTANT VARCHAR := 'bl_cl.prc_load_ce_sales_incremental';
+    v_count   INTEGER := 0;
     v_last_dt DATE;
-    v_row RECORD;
-    v_date_id INTEGER;
-    v_product_id BIGINT;
-    v_customer_id BIGINT;
-    v_city_id BIGINT;
-    v_employee_id BIGINT;
-    v_order_attr_id BIGINT;
+    -- Look-back window: how many days before the high-water mark to re-scan.
+    -- Catches late-arriving rows whose order_date falls slightly in the past.
+    -- Set to 30 days — adjust if your source can arrive later than that.
+    v_lookback CONSTANT INTEGER := 30;
 BEGIN
-    -- High-water mark: max event_dt already in CE_SALES
-    SELECT MAX(event_dt) INTO v_last_dt FROM bl_3nf.ce_sales;
+    -- STEP 1: Determine the scan window.
+    -- v_last_dt = the earliest date we need to re-check in SRC.
+    -- On first run MAX(event_dt) IS NULL → v_last_dt stays NULL → full load.
+    -- On subsequent runs: go back v_lookback days from the current max so that
+    -- late-arriving rows (order_date in the past) are not silently skipped.
+    SELECT
+        CASE
+            WHEN MAX(event_dt) IS NULL THEN NULL
+            ELSE MAX(event_dt) - v_lookback
+        END
+    INTO v_last_dt
+    FROM bl_3nf.ce_sales;
 
-    RAISE NOTICE '% incremental from: %', v_proc, COALESCE(v_last_dt::TEXT, 'full load');
+    RAISE NOTICE '% scanning SRC from: %', v_proc,
+        COALESCE(v_last_dt::TEXT, 'full load (first run)');
 
-    FOR v_row IN
+    -- STEP 2: Insert into CE_SALES.
+    -- TWO-LAYER incremental strategy:
+    --   Layer 1 (date range): SRC WHERE clause filters to rows on or after
+    --   v_last_dt. This eliminates the bulk of already-loaded rows cheaply,
+    --   using the idx_ce_sales_event_dt index on CE_SALES and the SRC
+    --   order_date column. Rows older than the look-back window are guaranteed
+    --   already loaded and are skipped without touching CE_SALES at all.
+    --   Layer 2 (NOT EXISTS): within the surviving candidate rows, the business
+    --   key check (order_id, product_id, customer_id, event_dt, source_system)
+    --   catches any duplicates inside the look-back window — i.e. rows that
+    --   were loaded on a previous run but fall within the 30-day re-scan band.
+    --   Uses idx_ce_sales_dedupe_key for fast lookup.
+    -- Together: fast for the common case, correct for late arrivals.
+    INSERT INTO bl_3nf.ce_sales (
+        event_dt, date_id, product_id, customer_id, city_id,
+        employee_id, order_attr_id, order_id,
+        sales_amt, cost_amt, profit_amt, shipping_cost_amt,
+        quantity_cnt, discount_amt,
+        insert_dt, update_dt, source_system, source_entity
+    )
+    SELECT
+        s.order_date,
+        COALESCE(d.date_id, -1),
+        COALESCE(p.product_id, -1),
+        COALESCE(c.customer_id, -1),
+        COALESCE(g.city_id, -1),
+        COALESCE(e.employee_id, -1),
+        COALESCE(oa.order_attr_id, -1),
+        s.order_id,
+        s.sales_amt, s.cost_amt, s.profit_amt, s.shipping_cost_amt,
+        s.quantity_cnt, s.discount_amt,
+        CURRENT_DATE, CURRENT_DATE,
+        s.source_system, s.source_entity
+    FROM (
+        -- STEP 3: Extract and clean domestic source sales data.
+        -- Layer 1 filter applied here: order_date >= v_last_dt.
         SELECT
-            s.order_date, s.order_id, s.product_id, s.customer_id,
-            s.city, 'N/A'::VARCHAR(100) AS state, s.country, s.region,
-            s.employee_id, s.ship_mode, s.order_priority,
-            s.sales AS sales_amt, s.cost AS cost_amt, s.profit AS profit_amt,
-            s.shipping_cost AS shipping_cost_amt, s.quantity AS quantity_cnt,
-            s.discount AS discount_amt,
-            'SA_DOMESTIC' AS source_system,
+            order_date, order_id, product_id, customer_id,
+            city, 'N/A'::VARCHAR(100) AS state, country, region,
+            employee_id,
+            COALESCE(NULLIF(TRIM(ship_mode), ''), 'n.a.')      AS ship_mode,
+            COALESCE(NULLIF(TRIM(order_priority), ''), 'n.a.') AS order_priority,
+            sales AS sales_amt, cost AS cost_amt, profit AS profit_amt,
+            shipping_cost AS shipping_cost_amt, quantity AS quantity_cnt,
+            discount AS discount_amt,
+            'SA_DOMESTIC'        AS source_system,
             'SRC_DOMESTIC_SALES' AS source_entity
-        FROM sa_domestic.src_domestic_sales s
-        WHERE s.order_date IS NOT NULL
-          AND s.order_id IS NOT NULL
-          AND s.product_id IS NOT NULL
-          AND (v_last_dt IS NULL OR s.order_date > v_last_dt)
+        FROM sa_domestic.src_domestic_sales
+        WHERE order_date IS NOT NULL
+          AND order_id   IS NOT NULL
+          AND product_id IS NOT NULL
+          AND (v_last_dt IS NULL OR order_date >= v_last_dt)
 
         UNION ALL
 
+        -- STEP 4: Extract and clean international source sales data.
+        -- Layer 1 filter applied here: order_date >= v_last_dt.
         SELECT
-            s.order_date, s.order_id, s.product_id, s.customer_id,
-            s.city, COALESCE(NULLIF(TRIM(s.state), ''), 'N/A') AS state,
-            s.country, s.region,
-            s.employee_id, NULL::VARCHAR(50), NULL::VARCHAR(25),
-            s.sales, s.cost, s.profit, s.shipping_cost, s.quantity, s.discount,
+            order_date, order_id, product_id, customer_id,
+            city, COALESCE(NULLIF(TRIM(state), ''), 'N/A') AS state,
+            country, region, employee_id,
+            'n.a.' AS ship_mode,
+            'n.a.' AS order_priority,
+            sales, cost, profit, shipping_cost, quantity, discount,
             'SA_INTERNATIONAL',
             'SRC_INTERNATIONAL_SALES'
-        FROM sa_international.src_international_sales s
-        WHERE s.order_date IS NOT NULL
-          AND s.order_id IS NOT NULL
-          AND s.product_id IS NOT NULL
-          AND (v_last_dt IS NULL OR s.order_date > v_last_dt)
-    LOOP
-        -- Idempotency guard
-        IF EXISTS (
-            SELECT 1 FROM bl_3nf.ce_sales e
-            WHERE e.order_id = v_row.order_id
-              AND e.event_dt = v_row.order_date
-              AND e.source_system = v_row.source_system
-        ) THEN CONTINUE;
-        END IF;
+        FROM sa_international.src_international_sales
+        WHERE order_date IS NOT NULL
+          AND order_id   IS NOT NULL
+          AND product_id IS NOT NULL
+          AND (v_last_dt IS NULL OR order_date >= v_last_dt)
+    ) s
+    -- STEP 5: Surrogate key lookups against 3NF dimension tables.
+    LEFT JOIN bl_3nf.ce_dates d
+        ON d.date_dt = s.order_date
+    LEFT JOIN bl_3nf.ce_products p
+        ON p.product_src_id = s.product_id
+    LEFT JOIN bl_3nf.ce_customers_scd c
+        ON c.customer_src_id = s.customer_id AND c.is_active = 'Y'
+    LEFT JOIN bl_3nf.ce_cities g
+        ON g.city_src_id = (s.city || '_' || s.country || '_' || s.region)
+    LEFT JOIN bl_3nf.ce_employees e
+        ON e.employee_src_id = s.employee_id
+    LEFT JOIN bl_3nf.ce_order_attributes oa
+        ON oa.ship_mode = s.ship_mode AND oa.order_priority = s.order_priority
+    -- STEP 6: Layer 2 filter - business key duplicate check.
+    -- Eliminates rows that fall inside the look-back window but were already
+    -- loaded on a previous run. Uses idx_ce_sales_dedupe_key.
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM bl_3nf.ce_sales existing
+        WHERE existing.order_id = s.order_id
+          AND existing.product_id = COALESCE(p.product_id, -1)
+          AND existing.customer_id = COALESCE(c.customer_id, -1)
+          AND existing.event_dt = s.order_date
+          AND existing.source_system = s.source_system
+    );
 
-        -- Resolve surrogate keys, COALESCE to -1 on miss
-        SELECT COALESCE(date_id, -1) INTO v_date_id FROM bl_3nf.ce_dates WHERE date_dt = v_row.order_date;
-        SELECT COALESCE(product_id, -1) INTO v_product_id FROM bl_3nf.ce_products WHERE product_src_id = v_row.product_id;
-        SELECT COALESCE(customer_id, -1) INTO v_customer_id FROM bl_3nf.ce_customers_scd WHERE customer_src_id = v_row.customer_id AND is_active = 'Y';
-        SELECT COALESCE(city_id, -1) INTO v_city_id FROM bl_3nf.ce_cities WHERE city_src_id = (v_row.city || '_' || v_row.country || '_' || v_row.region);
-        SELECT COALESCE(employee_id, -1) INTO v_employee_id FROM bl_3nf.ce_employees WHERE employee_src_id = v_row.employee_id;
-        SELECT COALESCE(order_attr_id, -1) INTO v_order_attr_id FROM bl_3nf.ce_order_attributes WHERE ship_mode = COALESCE(NULLIF(v_row.ship_mode, ''), 'n.a.') AND order_priority = COALESCE(NULLIF(v_row.order_priority, ''), 'n.a.');
-
-        INSERT INTO bl_3nf.ce_sales (
-            event_dt, date_id, product_id, customer_id, city_id,
-            employee_id, order_attr_id, order_id,
-            sales_amt, cost_amt, profit_amt, shipping_cost_amt,
-            quantity_cnt, discount_amt,
-            insert_dt, update_dt, source_system, source_entity
-        )
-        VALUES (
-            v_row.order_date,
-            COALESCE(v_date_id, -1),
-            COALESCE(v_product_id, -1),
-            COALESCE(v_customer_id, -1),
-            COALESCE(v_city_id, -1),
-            COALESCE(v_employee_id, -1),
-            COALESCE(v_order_attr_id, -1),
-            COALESCE(v_row.order_id, 'n.a.'),
-            v_row.sales_amt, v_row.cost_amt, v_row.profit_amt,
-            v_row.shipping_cost_amt, v_row.quantity_cnt, v_row.discount_amt,
-            CURRENT_DATE, CURRENT_DATE,
-            v_row.source_system, v_row.source_entity
-        );
-
-        v_count := v_count + 1;
-    END LOOP;
+    -- STEP 7: Capture row count and log successful execution.
+    GET DIAGNOSTICS v_count = ROW_COUNT;
 
     CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
-        'Incremental load from ' || COALESCE(v_last_dt::TEXT, 'beginning')
-        || ': ' || v_count || ' new rows into bl_3nf.ce_sales');
+        'Incremental load (window from ' || COALESCE(v_last_dt::TEXT, 'beginning')
+        || ', look-back ' || v_lookback || ' days): '
+        || v_count || ' new rows into bl_3nf.ce_sales');
 
-    COMMIT;
-
+-- STEP 8: Handle execution errors and log failures.
 EXCEPTION WHEN OTHERS THEN
     CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
         'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
@@ -696,11 +735,9 @@ BEGIN
         v_month_count := v_month_count + 1;
     END LOOP;
 
-    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+	CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
         'Rolling window: refreshed ' || v_month_count
         || ' month partitions, ' || v_count || ' total rows in bl_dm.fct_sales_dd');
-
-    COMMIT;
 
 EXCEPTION WHEN OTHERS THEN
     CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
@@ -786,19 +823,20 @@ WHERE customer_src_id = (
 ORDER BY start_dt;
 
 
--- STEP 7.2: Simulate source data change — segment updated in SRC_ table
+-- STEP 7.2: Simulate source data change - segment updated in SRC_ table
 -- (In a real incremental load this arrives via the updated CSV.
 --  Here we update SRC_ directly to simulate the source system sending new data.)
+-- NOTE: customer_src_id is the natural key (VARCHAR) that matches the SRC table's customer_id column.
 UPDATE sa_domestic.src_domestic_sales
 SET segment = 'Corporate'
 WHERE customer_id = (
     SELECT customer_src_id FROM bl_3nf.ce_customers_scd
     WHERE customer_segment = 'Consumer' AND is_active = 'Y' AND customer_id != -1
-    ORDER BY customer_id LIMIT 1
+    ORDER BY customer_src_id LIMIT 1
 );
 
 
--- STEP 7.3: Run the 3NF customer procedure — detects change, creates new version
+-- STEP 7.3: Run the 3NF customer procedure - detects change, creates new version
 CALL bl_cl.prc_load_customers_scd();
 
 SELECT customer_id, customer_src_id, customer_name,
@@ -813,7 +851,7 @@ ORDER BY start_dt;
 -- EXPECTED: 2 rows — original (IS_ACTIVE=N) + new version (IS_ACTIVE=Y, Corporate)
 
 
--- STEP 7.4: Run the DM customer SCD2 procedure — mirrors the versioning in DM
+-- STEP 7.4: Run the DM customer SCD2 procedure - mirrors the versioning in DM
 CALL bl_cl.prc_load_dim_customers_scd();
 
 SELECT customer_surr_id, customer_src_id, customer_name,

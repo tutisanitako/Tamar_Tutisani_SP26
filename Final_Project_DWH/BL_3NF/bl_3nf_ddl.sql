@@ -51,10 +51,10 @@ CREATE TABLE IF NOT EXISTS bl_3nf.ce_dates (
     weekend_flag INTEGER NOT NULL,
     iso_week_no INTEGER NOT NULL,
     day_of_month_no INTEGER NOT NULL,
-    month_value VARCHAR(2) NOT NULL,
+    month_value VARCHAR(5) NOT NULL,
     month_desc VARCHAR(25) NOT NULL,
-    quarter_value VARCHAR(1) NOT NULL,
-    quarter_desc VARCHAR(2) NOT NULL,
+    quarter_value VARCHAR(5) NOT NULL,
+    quarter_desc VARCHAR(25) NOT NULL,
     year_value VARCHAR(4) NOT NULL,
     insert_dt DATE NOT NULL,
     update_dt DATE NOT NULL
@@ -181,7 +181,6 @@ CREATE TABLE IF NOT EXISTS bl_3nf.ce_cities (
 
 -- CE_CUSTOMERS_SCD (SCD Type 2 - tracks historical changes to customer_segment)
 -- Composite PK: (customer_id, start_dt) per SCD2 convention on 3NF layer.
--- No FK database constraint from fact table to this table (SCD2 rule).
 CREATE TABLE IF NOT EXISTS bl_3nf.ce_customers_scd (
     customer_id BIGINT NOT NULL,
     customer_src_id VARCHAR(100) NOT NULL,
@@ -191,6 +190,7 @@ CREATE TABLE IF NOT EXISTS bl_3nf.ce_customers_scd (
     end_dt DATE NOT NULL,
     is_active VARCHAR(1) NOT NULL,
     insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
     source_system VARCHAR(100) NOT NULL,
     source_entity VARCHAR(100) NOT NULL,
     PRIMARY KEY (customer_id, start_dt)
@@ -227,6 +227,7 @@ CREATE TABLE IF NOT EXISTS bl_3nf.ce_order_attributes (
 -- CE_SALES (fact table at 3NF level - transaction grain)
 -- KPI columns are the ONLY nullable columns.
 -- No FK to CE_CUSTOMERS_SCD (SCD2 composite PK, logical FK only).
+-- Composite PK on business key: order_id + product_id + customer_id + event_dt + source_system.
 CREATE TABLE IF NOT EXISTS bl_3nf.ce_sales (
     event_dt DATE NOT NULL,
     date_id INTEGER NOT NULL,
@@ -260,7 +261,9 @@ CREATE TABLE IF NOT EXISTS bl_3nf.ce_sales (
         REFERENCES bl_3nf.ce_cities(city_id),
     CONSTRAINT fk_sales_to_order_attr
         FOREIGN KEY (order_attr_id)
-        REFERENCES bl_3nf.ce_order_attributes(order_attr_id)
+        REFERENCES bl_3nf.ce_order_attributes(order_attr_id),
+    CONSTRAINT pk_ce_sales
+        PRIMARY KEY (order_id, product_id, customer_id, event_dt, source_system)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ce_sales_event_dt ON bl_3nf.ce_sales(event_dt);
@@ -315,10 +318,10 @@ INSERT INTO bl_3nf.ce_dates (
 VALUES (
     -1, '1900-01-01'::DATE, -1,
     COALESCE(NULL, 'n.a.'), -1, -1, -1,
-    COALESCE(NULL, 'n.'),
     COALESCE(NULL, 'n.a.'),
-    COALESCE(NULL, 'n'),
-    COALESCE(NULL, 'n.'),
+    COALESCE(NULL, 'n.a.'),
+    COALESCE(NULL, 'n.a.'),
+    COALESCE(NULL, 'n.a.'),
     COALESCE(NULL, 'n.a.'),
     '1900-01-01'::DATE, '1900-01-01'::DATE
 )
@@ -462,7 +465,7 @@ COMMIT;
 -- CE_CUSTOMERS_SCD default row (SCD Type 2)
 INSERT INTO bl_3nf.ce_customers_scd (
     customer_id, customer_src_id, customer_name, customer_segment,
-    start_dt, end_dt, is_active, insert_dt, source_system, source_entity
+    start_dt, end_dt, is_active, insert_dt, update_dt, source_system, source_entity
 )
 VALUES (
     -1,
@@ -470,7 +473,7 @@ VALUES (
     COALESCE(NULL, 'n.a.'),
     COALESCE(NULL, 'n.a.'),
     '1900-01-01'::DATE, '9999-12-31'::DATE, 'Y',
-    '1900-01-01'::DATE,
+    '1900-01-01'::DATE, '1900-01-01'::DATE,
     COALESCE(NULL, 'MANUAL'),
     COALESCE(NULL, 'MANUAL')
 )

@@ -1,6 +1,6 @@
 -- BL_DM DDL: Dimensional Layer Tables, Sequences, Default Rows, DIM_TIME_DAY population
--- Global Retail Superstore Sales | Tamar Tutisani
--- Run this SIXTH, after bl_3nf_dml.sql.
+-- Global Retail Superstore Sales
+-- Tamar Tutisani
 --
 -- DDL DESIGN NOTE:
 -- Using CREATE TABLE IF NOT EXISTS instead of DROP TABLE IF EXISTS CASCADE.
@@ -27,12 +27,12 @@ CREATE SCHEMA IF NOT EXISTS bl_dm;
 
 -- STEP 1: Create SEQUENCES for surrogate key generation
 -- One sequence per dimension table. SEQUENCES only, never SERIAL type.
--- DIM_TIME_DAY uses YYYYMMDD integer keys — no sequence needed.
+-- DIM_TIME_DAY uses YYYYMMDD integer keys, no sequence needed.
 -----------------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_product_surr_id    START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_customer_surr_id    START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_geography_surr_id   START 100 INCREMENT 1;
-CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_employee_surr_id    START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_product_surr_id START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_customer_surr_id START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_geography_surr_id START 100 INCREMENT 1;
+CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_employee_surr_id START 100 INCREMENT 1;
 CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_order_attr_surr_id START 100 INCREMENT 1;
 
 
@@ -47,20 +47,20 @@ CREATE SEQUENCE IF NOT EXISTS bl_dm.seq_order_attr_surr_id START 100 INCREMENT 1
 -- month_value/quarter_value are VARCHAR(5) to accommodate both real values
 -- (2 chars) and the 'n.a.' default placeholder without truncation.
 CREATE TABLE IF NOT EXISTS bl_dm.dim_time_day (
-    date_id            INTEGER     NOT NULL PRIMARY KEY,
-    date_dt            DATE        NOT NULL,
-    day_of_week_no     INTEGER     NOT NULL CHECK (day_of_week_no BETWEEN -1 AND 7),
-    day_of_week_desc   VARCHAR(25) NOT NULL,
-    weekend_flag       INTEGER     NOT NULL CHECK (weekend_flag IN (-1, 0, 1)),
-    iso_week_no        INTEGER     NOT NULL,
-    day_of_month_no    INTEGER     NOT NULL,
-    month_value        VARCHAR(5)  NOT NULL,
-    month_desc         VARCHAR(25) NOT NULL,
-    quarter_value      VARCHAR(5)  NOT NULL,
-    quarter_desc       VARCHAR(5)  NOT NULL,
-    year_value         VARCHAR(4)  NOT NULL,
-    insert_dt          DATE        NOT NULL,
-    update_dt          DATE        NOT NULL
+    date_id INTEGER NOT NULL PRIMARY KEY,
+    date_dt DATE NOT NULL,
+    day_of_week_no INTEGER NOT NULL CHECK (day_of_week_no BETWEEN -1 AND 7),
+    day_of_week_desc VARCHAR(25) NOT NULL,
+    weekend_flag INTEGER NOT NULL CHECK (weekend_flag IN (-1, 0, 1)),
+    iso_week_no INTEGER NOT NULL,
+    day_of_month_no INTEGER NOT NULL,
+    month_value VARCHAR(5) NOT NULL,
+    month_desc VARCHAR(25) NOT NULL,
+    quarter_value VARCHAR(5) NOT NULL,
+    quarter_desc VARCHAR(25) NOT NULL,
+    year_value VARCHAR(4) NOT NULL,
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_time_day_date_dt
@@ -69,17 +69,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_dim_time_day_date_dt
 
 -- DIM_PRODUCTS (SCD Type 1 - hierarchy flattened: Category > Sub-Category > Product)
 CREATE TABLE IF NOT EXISTS bl_dm.dim_products (
-    product_surr_id          BIGINT       NOT NULL PRIMARY KEY,
-    product_src_id           VARCHAR(50)  NOT NULL UNIQUE,
-    product_name             VARCHAR(255) NOT NULL,
-    product_category_id      BIGINT       NOT NULL,
-    product_category_name    VARCHAR(100) NOT NULL,
-    product_subcategory_id   BIGINT       NOT NULL,
+    product_surr_id BIGINT NOT NULL PRIMARY KEY,
+    product_src_id VARCHAR(50) NOT NULL UNIQUE,
+    product_name VARCHAR(255) NOT NULL,
+    product_category_id BIGINT NOT NULL,
+    product_category_name VARCHAR(100) NOT NULL,
+    product_subcategory_id BIGINT NOT NULL,
     product_subcategory_name VARCHAR(100) NOT NULL,
-    insert_dt                DATE         NOT NULL,
-    update_dt                DATE         NOT NULL,
-    source_system            VARCHAR(100) NOT NULL,
-    source_entity            VARCHAR(100) NOT NULL
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
+    source_system VARCHAR(100) NOT NULL,
+    source_entity VARCHAR(100) NOT NULL
 );
 
 
@@ -90,17 +90,17 @@ CREATE TABLE IF NOT EXISTS bl_dm.dim_products (
 -- No FK from FCT_SALES_DD: FK constraints to SCD2 tables are prohibited
 -- per naming conventions. Enforced at ETL level only.
 CREATE TABLE IF NOT EXISTS bl_dm.dim_customers_scd (
-    customer_surr_id  BIGINT       NOT NULL,
-    customer_src_id   VARCHAR(100) NOT NULL,
-    customer_name     VARCHAR(255) NOT NULL,
-    customer_segment  VARCHAR(50)  NOT NULL,
-    start_dt          DATE         NOT NULL,
-    end_dt            DATE         NOT NULL,
-    is_active         VARCHAR(1)   NOT NULL CHECK (is_active IN ('Y', 'N')),
-    insert_dt         DATE         NOT NULL,
-    update_dt         DATE         NOT NULL,
-    source_system     VARCHAR(100) NOT NULL,
-    source_entity     VARCHAR(100) NOT NULL,
+    customer_surr_id BIGINT NOT NULL,
+    customer_src_id VARCHAR(100) NOT NULL,
+    customer_name VARCHAR(255) NOT NULL,
+    customer_segment VARCHAR(50) NOT NULL,
+    start_dt DATE NOT NULL,
+    end_dt DATE NOT NULL,
+    is_active VARCHAR(1) NOT NULL CHECK (is_active IN ('Y', 'N')),
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
+    source_system VARCHAR(100) NOT NULL,
+    source_entity VARCHAR(100) NOT NULL,
     PRIMARY KEY (customer_surr_id, start_dt),
     CHECK (end_dt > start_dt)
 );
@@ -113,43 +113,43 @@ CREATE INDEX IF NOT EXISTS idx_dim_customers_scd_active
 
 -- DIM_GEOGRAPHY (SCD Type 1 - hierarchy flattened: Market > Region > Country > State > City)
 CREATE TABLE IF NOT EXISTS bl_dm.dim_geography (
-    geography_surr_id BIGINT       NOT NULL PRIMARY KEY,
-    geography_src_id  VARCHAR(255) NOT NULL UNIQUE,
-    city_name         VARCHAR(100) NOT NULL,
-    state_name        VARCHAR(100) NOT NULL,
-    country_name      VARCHAR(100) NOT NULL,
-    region_name       VARCHAR(100) NOT NULL,
-    market_name       VARCHAR(50)  NOT NULL,
-    insert_dt         DATE         NOT NULL,
-    update_dt         DATE         NOT NULL,
-    source_system     VARCHAR(100) NOT NULL,
-    source_entity     VARCHAR(100) NOT NULL
+    geography_surr_id BIGINT NOT NULL PRIMARY KEY,
+    geography_src_id VARCHAR(255) NOT NULL UNIQUE,
+    city_name VARCHAR(100) NOT NULL,
+    state_name VARCHAR(100) NOT NULL,
+    country_name VARCHAR(100) NOT NULL,
+    region_name VARCHAR(100) NOT NULL,
+    market_name VARCHAR(50) NOT NULL,
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
+    source_system VARCHAR(100) NOT NULL,
+    source_entity VARCHAR(100) NOT NULL
 );
 
 
 -- DIM_EMPLOYEES (SCD Type 1)
 -- Employee Name = 'n.a.' when only sourced from International system.
 CREATE TABLE IF NOT EXISTS bl_dm.dim_employees (
-    employee_surr_id BIGINT       NOT NULL PRIMARY KEY,
-    employee_src_id  VARCHAR(50)  NOT NULL UNIQUE,
-    employee_name    VARCHAR(255) NOT NULL,
-    insert_dt        DATE         NOT NULL,
-    update_dt        DATE         NOT NULL,
-    source_system    VARCHAR(100) NOT NULL,
-    source_entity    VARCHAR(100) NOT NULL
+    employee_surr_id BIGINT NOT NULL PRIMARY KEY,
+    employee_src_id VARCHAR(50) NOT NULL UNIQUE,
+    employee_name VARCHAR(255) NOT NULL,
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
+    source_system VARCHAR(100) NOT NULL,
+    source_entity VARCHAR(100) NOT NULL
 );
 
 
 -- DIM_ORDER_ATTRIBUTES (SCD Type 0 - junk dimension: Ship Mode x Order Priority)
 -- International fact rows reference the default (-1) row.
 CREATE TABLE IF NOT EXISTS bl_dm.dim_order_attributes (
-    order_attr_surr_id BIGINT       NOT NULL PRIMARY KEY,
-    ship_mode          VARCHAR(50)  NOT NULL,
-    order_priority     VARCHAR(25)  NOT NULL,
-    insert_dt          DATE         NOT NULL,
-    update_dt          DATE         NOT NULL,
-    source_system      VARCHAR(100) NOT NULL,
-    source_entity      VARCHAR(100) NOT NULL,
+    order_attr_surr_id BIGINT NOT NULL PRIMARY KEY,
+    ship_mode VARCHAR(50) NOT NULL,
+    order_priority VARCHAR(25) NOT NULL,
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
+    source_system VARCHAR(100) NOT NULL,
+    source_entity VARCHAR(100) NOT NULL,
     UNIQUE (ship_mode, order_priority)
 );
 
@@ -158,28 +158,37 @@ CREATE TABLE IF NOT EXISTS bl_dm.dim_order_attributes (
 -- ORDER_ID is a degenerate dimension, not a FK.
 -- No FK to DIM_CUSTOMERS_SCD (SCD2 - prohibited per naming conventions).
 -- KPI columns are the ONLY nullable columns.
--- Partitioned by RANGE on event_dt — one partition per month.
+-- Partitioned by RANGE on event_dt, one partition per month.
 -- Partitions are created and attached by the rolling-window load procedure.
+--
+-- POSTGRESQL PARTITIONING NOTE:
+-- FK constraints declared on a partitioned parent table are NOT enforced
+-- on child partitions by PostgreSQL (as of PG 14+). The constraints are
+-- syntactically valid and serve as documentation of referential intent,
+-- but violation checking does not propagate to individual partitions.
+-- Referential integrity between FCT_SALES_DD and dimension tables is
+-- therefore enforced at the ETL level (COALESCE to default -1 row, LEFT JOINs)
+-- rather than at the database constraint level.
 CREATE TABLE IF NOT EXISTS bl_dm.fct_sales_dd (
-    event_dt             DATE         NOT NULL,
-    date_id              INTEGER      NOT NULL,
-    product_surr_id      BIGINT       NOT NULL,
-    customer_surr_id     BIGINT       NOT NULL,
-    geography_surr_id    BIGINT       NOT NULL,
-    employee_surr_id     BIGINT       NOT NULL,
-    order_attr_surr_id   BIGINT       NOT NULL,
-    order_id             VARCHAR(50)  NOT NULL,
-    sales_amt            NUMERIC(15,2),
-    cost_amt             NUMERIC(15,2),
-    profit_amt           NUMERIC(15,2),
-    shipping_cost_amt    NUMERIC(15,2),
-    quantity_cnt         NUMERIC(10,0),
-    discount_amt         NUMERIC(5,4),
-    profit_margin_amt    NUMERIC(10,4),
-    insert_dt            DATE         NOT NULL,
-    update_dt            DATE         NOT NULL,
-    source_system        VARCHAR(100) NOT NULL,
-    source_entity        VARCHAR(100) NOT NULL,
+    event_dt DATE NOT NULL,
+    date_id INTEGER NOT NULL,
+    product_surr_id BIGINT NOT NULL,
+    customer_surr_id BIGINT NOT NULL,
+    geography_surr_id BIGINT NOT NULL,
+    employee_surr_id BIGINT NOT NULL,
+    order_attr_surr_id BIGINT NOT NULL,
+    order_id VARCHAR(50) NOT NULL,
+    sales_amt NUMERIC(15,2),
+    cost_amt NUMERIC(15,2),
+    profit_amt NUMERIC(15,2),
+    shipping_cost_amt NUMERIC(15,2),
+    quantity_cnt NUMERIC(10,0),
+    discount_amt NUMERIC(5,4),
+    profit_margin_amt NUMERIC(10,4),
+    insert_dt DATE NOT NULL,
+    update_dt DATE NOT NULL,
+    source_system VARCHAR(100) NOT NULL,
+    source_entity VARCHAR(100) NOT NULL,
     CONSTRAINT fk_fct_sales_to_time
         FOREIGN KEY (date_id)
         REFERENCES bl_dm.dim_time_day(date_id),
@@ -198,12 +207,12 @@ CREATE TABLE IF NOT EXISTS bl_dm.fct_sales_dd (
 )
 PARTITION BY RANGE (event_dt);
 
-CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_event_dt          ON bl_dm.fct_sales_dd(event_dt);
-CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_product_surr_id   ON bl_dm.fct_sales_dd(product_surr_id);
-CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_customer_surr_id  ON bl_dm.fct_sales_dd(customer_surr_id);
+CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_event_dt ON bl_dm.fct_sales_dd(event_dt);
+CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_product_surr_id ON bl_dm.fct_sales_dd(product_surr_id);
+CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_customer_surr_id ON bl_dm.fct_sales_dd(customer_surr_id);
 CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_geography_surr_id ON bl_dm.fct_sales_dd(geography_surr_id);
-CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_employee_surr_id  ON bl_dm.fct_sales_dd(employee_surr_id);
-CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_order_id          ON bl_dm.fct_sales_dd(order_id);
+CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_employee_surr_id ON bl_dm.fct_sales_dd(employee_surr_id);
+CREATE INDEX IF NOT EXISTS idx_fct_sales_dd_order_id ON bl_dm.fct_sales_dd(order_id);
 
 
 -- STEP 3: Populate DIM_TIME_DAY for full 2024-2025 range

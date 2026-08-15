@@ -1,6 +1,6 @@
 -- BL_3NF DML: Loading procedures for all CE_ tables
--- Global Retail Superstore Sales | Tamar Tutisani
--- Run this FIFTH, after bl_3nf_ddl.sql.
+-- Global Retail Superstore Sales
+-- Tamar Tutisani
 --
 -- Contains:
 --   - fn_get_source_categories() : function returning SETOF composite type
@@ -30,7 +30,7 @@
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type t
-                   JOIN pg_namespace n ON n.oid = t.typnamespace
+                   INNER JOIN pg_namespace n ON n.oid = t.typnamespace
                    WHERE t.typname = 't_category_row' AND n.nspname = 'bl_cl') THEN
         CREATE TYPE bl_cl.t_category_row AS (
             category_name VARCHAR(100)
@@ -68,9 +68,9 @@ CREATE OR REPLACE PROCEDURE bl_cl.prc_load_product_categories()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_product_categories';
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_product_categories';
     v_count INTEGER := 0;
-    v_row   bl_cl.t_category_row;
+    v_row bl_cl.t_category_row;
 BEGIN
     FOR v_row IN
         SELECT * FROM bl_cl.fn_get_source_categories()
@@ -111,15 +111,15 @@ CREATE OR REPLACE PROCEDURE bl_cl.prc_load_product_subcategories()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_proc    CONSTANT VARCHAR := 'bl_cl.prc_load_product_subcategories';
-    v_count   INTEGER := 0;
-    v_row     RECORD;
-    v_cat_id  BIGINT;
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_product_subcategories';
+    v_count INTEGER := 0;
+    v_row RECORD;
+    v_cat_id BIGINT;
 BEGIN
     FOR v_row IN
         SELECT DISTINCT
             TRIM(sub_category)::VARCHAR(100) AS sub_category_name,
-            TRIM(category)::VARCHAR(100)     AS category_name
+            TRIM(category)::VARCHAR(100) AS category_name
         FROM sa_domestic.src_domestic_sales
         WHERE sub_category IS NOT NULL AND TRIM(sub_category) != ''
         UNION
@@ -417,21 +417,21 @@ CREATE OR REPLACE PROCEDURE bl_cl.prc_load_states()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_proc   CONSTANT VARCHAR := 'bl_cl.prc_load_states';
-    v_count  INTEGER := 0;
-    v_row    RECORD;
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_states';
+    v_count INTEGER := 0;
+    v_row RECORD;
     v_cty_id BIGINT;
     v_src_id VARCHAR(255);
 BEGIN
     FOR v_row IN
         SELECT DISTINCT
-            'N/A'::VARCHAR(100)         AS state_name,
+            'N/A'::VARCHAR(100) AS state_name,
             TRIM(country)::VARCHAR(100) AS country_name
         FROM sa_domestic.src_domestic_sales
         WHERE country IS NOT NULL AND TRIM(country) != ''
         UNION
         SELECT DISTINCT
-            TRIM(state)::VARCHAR(100)   AS state_name,
+            TRIM(state)::VARCHAR(100) AS state_name,
             TRIM(country)::VARCHAR(100) AS country_name
         FROM sa_international.src_international_sales
         WHERE state IS NOT NULL AND TRIM(state) != ''
@@ -548,7 +548,6 @@ $$;
 
 
 -- 2.9 CE_CUSTOMERS_SCD (SCD Type 2)
--- FIXED: includes full SCD2 versioning logic per mentor feedback.
 -- Three cases handled:
 --   A) New customer (never seen before)   -> insert first active version
 --   B) Existing customer, attribute changed -> expire old row, insert new version
@@ -557,54 +556,66 @@ CREATE OR REPLACE PROCEDURE bl_cl.prc_load_customers_scd()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_proc          CONSTANT VARCHAR := 'bl_cl.prc_load_customers_scd';
-    v_count_new     INTEGER := 0;
-    v_count_scd     INTEGER := 0;
-    v_row           RECORD;
-    v_existing_seg  VARCHAR(50);
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_customers_scd';
+    v_count_new INTEGER := 0;
+    v_count_scd INTEGER := 0;
+    v_row RECORD;
+    v_existing_seg VARCHAR(50);
     v_existing_name VARCHAR(255);
-    v_old_start_dt  DATE;
-    v_new_end_dt    DATE;
+    v_old_start_dt DATE;
+    v_new_end_dt DATE;
 BEGIN
     FOR v_row IN
-        SELECT customer_src_id, customer_name, customer_segment,
-               source_system, source_entity
+        -- Final DISTINCT ON ensures each customer_src_id enters the loop exactly once,
+        -- even if the same ID appears in both source systems.
+        -- SA_DOMESTIC sorts before SA_INTERNATIONAL so the domestic row (with name)
+        -- is kept when the same customer exists in both sources.
+        -- Note: DISTINCT ON subqueries with ORDER BY must be wrapped in their own
+        -- subselect before being combined with UNION ALL — PostgreSQL syntax rule.
+        SELECT DISTINCT ON (customer_src_id)
+            customer_src_id, customer_name, customer_segment,
+            source_system, source_entity
         FROM (
-            SELECT DISTINCT ON (customer_id)
-                customer_id        AS customer_src_id,
-                customer_name,
-                segment            AS customer_segment,
-                'SA_DOMESTIC'      AS source_system,
-                'SRC_DOMESTIC_SALES' AS source_entity
-            FROM sa_domestic.src_domestic_sales
-            WHERE customer_id IS NOT NULL AND TRIM(customer_id) != ''
-            ORDER BY customer_id, customer_name
+            SELECT * FROM (
+                SELECT DISTINCT ON (customer_id)
+                    customer_id AS customer_src_id,
+                    customer_name,
+                    segment AS customer_segment,
+                    'SA_DOMESTIC' AS source_system,
+                    'SRC_DOMESTIC_SALES' AS source_entity
+                FROM sa_domestic.src_domestic_sales
+                WHERE customer_id IS NOT NULL AND TRIM(customer_id) != ''
+                ORDER BY customer_id, customer_name
+            ) dom
 
             UNION ALL
 
-            SELECT DISTINCT ON (customer_id)
-                customer_id            AS customer_src_id,
-                customer_name,
-                segment                AS customer_segment,
-                'SA_INTERNATIONAL'     AS source_system,
-                'SRC_INTERNATIONAL_SALES' AS source_entity
-            FROM sa_international.src_international_sales
-            WHERE customer_id IS NOT NULL AND TRIM(customer_id) != ''
-            ORDER BY customer_id, customer_name
+            SELECT * FROM (
+                SELECT DISTINCT ON (customer_id)
+                    customer_id AS customer_src_id,
+                    customer_name,
+                    segment  AS customer_segment,
+                    'SA_INTERNATIONAL' AS source_system,
+                    'SRC_INTERNATIONAL_SALES' AS source_entity
+                FROM sa_international.src_international_sales
+                WHERE customer_id IS NOT NULL AND TRIM(customer_id) != ''
+                ORDER BY customer_id, customer_name
+            ) intl
         ) combined
+        ORDER BY customer_src_id, source_system
     LOOP
         -- Check if this customer already has an active row in CE_CUSTOMERS_SCD
         SELECT customer_segment, customer_name
-        INTO   v_existing_seg, v_existing_name
-        FROM   bl_3nf.ce_customers_scd
-        WHERE  customer_src_id = v_row.customer_src_id
-          AND  is_active = 'Y';
+        INTO v_existing_seg, v_existing_name
+        FROM bl_3nf.ce_customers_scd
+        WHERE customer_src_id = v_row.customer_src_id
+          AND is_active = 'Y';
 
         IF NOT FOUND THEN
-            -- CASE A: brand new customer — insert first version
+            -- CASE A: brand new customer - insert first version
             INSERT INTO bl_3nf.ce_customers_scd (
                 customer_id, customer_src_id, customer_name, customer_segment,
-                start_dt, end_dt, is_active, insert_dt, source_system, source_entity
+                start_dt, end_dt, is_active, insert_dt, update_dt, source_system, source_entity
             )
             VALUES (
                 nextval('bl_3nf.seq_customer_id'),
@@ -615,34 +626,36 @@ BEGIN
                 '9999-12-31'::DATE,
                 'Y',
                 CURRENT_DATE,
+                CURRENT_DATE,
                 v_row.source_system,
                 v_row.source_entity
             );
             v_count_new := v_count_new + 1;
 
-        ELSIF v_existing_seg  IS DISTINCT FROM v_row.customer_segment
+        ELSIF v_existing_seg IS DISTINCT FROM v_row.customer_segment
            OR v_existing_name IS DISTINCT FROM v_row.customer_name THEN
-            -- CASE B: attribute changed — SCD2 versioning
+            -- CASE B: attribute changed - SCD2 versioning
 
             -- Get start_dt of the row about to be expired
             SELECT start_dt INTO v_old_start_dt
-            FROM   bl_3nf.ce_customers_scd
-            WHERE  customer_src_id = v_row.customer_src_id AND is_active = 'Y';
+            FROM bl_3nf.ce_customers_scd
+            WHERE customer_src_id = v_row.customer_src_id AND is_active = 'Y';
 
             -- end_dt must be strictly > start_dt
             v_new_end_dt := GREATEST(v_old_start_dt + 1, CURRENT_DATE);
 
             -- Expire the current active row
             UPDATE bl_3nf.ce_customers_scd
-            SET    end_dt    = v_new_end_dt,
-                   is_active = 'N'
+            SET    end_dt = v_new_end_dt,
+                   is_active = 'N',
+                   update_dt = CURRENT_DATE
             WHERE  customer_src_id = v_row.customer_src_id
               AND  is_active = 'Y';
 
             -- Insert the new active version
             INSERT INTO bl_3nf.ce_customers_scd (
                 customer_id, customer_src_id, customer_name, customer_segment,
-                start_dt, end_dt, is_active, insert_dt, source_system, source_entity
+                start_dt, end_dt, is_active, insert_dt, update_dt, source_system, source_entity
             )
             VALUES (
                 nextval('bl_3nf.seq_customer_id'),
@@ -652,6 +665,7 @@ BEGIN
                 v_new_end_dt + 1,
                 '9999-12-31'::DATE,
                 'Y',
+                CURRENT_DATE,
                 CURRENT_DATE,
                 v_row.source_system,
                 v_row.source_entity
@@ -741,9 +755,9 @@ CREATE OR REPLACE PROCEDURE bl_cl.prc_load_order_attributes()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_order_attributes';
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_order_attributes';
     v_count INTEGER := 0;
-    v_row   RECORD;
+    v_row RECORD;
 BEGIN
     FOR v_row IN
         SELECT DISTINCT
@@ -823,10 +837,10 @@ $$;
 
 -- SECTION 4: PERFORMANCE INDEXES (run before fact load)
 -----------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS idx_src_dom_product_id   ON sa_domestic.src_domestic_sales(product_id);
-CREATE INDEX IF NOT EXISTS idx_src_dom_customer_id  ON sa_domestic.src_domestic_sales(customer_id);
-CREATE INDEX IF NOT EXISTS idx_src_dom_employee_id  ON sa_domestic.src_domestic_sales(employee_id);
-CREATE INDEX IF NOT EXISTS idx_src_intl_product_id  ON sa_international.src_international_sales(product_id);
+CREATE INDEX IF NOT EXISTS idx_src_dom_product_id ON sa_domestic.src_domestic_sales(product_id);
+CREATE INDEX IF NOT EXISTS idx_src_dom_customer_id ON sa_domestic.src_domestic_sales(customer_id);
+CREATE INDEX IF NOT EXISTS idx_src_dom_employee_id ON sa_domestic.src_domestic_sales(employee_id);
+CREATE INDEX IF NOT EXISTS idx_src_intl_product_id ON sa_international.src_international_sales(product_id);
 CREATE INDEX IF NOT EXISTS idx_src_intl_customer_id ON sa_international.src_international_sales(customer_id);
 CREATE INDEX IF NOT EXISTS idx_src_intl_employee_id ON sa_international.src_international_sales(employee_id);
 

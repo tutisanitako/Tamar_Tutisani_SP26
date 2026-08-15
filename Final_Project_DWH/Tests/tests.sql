@@ -10,9 +10,9 @@
 -----------------------------------------------------------------------------
 
 
--- ============================================================
+---------------------------------------------------------------
 -- TEST GROUP 1: NO DUPLICATES IN TARGET TABLES
--- ============================================================
+---------------------------------------------------------------
 
 -- TEST 1.1: No duplicate fact rows in CE_SALES (3NF fact)
 -- Business key: order_id + product_id + customer_id + event_dt + source_system
@@ -122,9 +122,9 @@ LIMIT 10;
 -- EXPECTED: 0 rows
 
 
--- ============================================================
+---------------------------------------------------------------
 -- TEST GROUP 2: ALL BUSINESS KEYS FROM SA ARE IN BL_3NF AND BL_DM
--- ============================================================
+---------------------------------------------------------------
 
 -- TEST 2.1: Every distinct order_id from SA_DOMESTIC appears in CE_SALES
 SELECT COUNT(*) AS domestic_orders_missing_from_3nf
@@ -236,32 +236,125 @@ WHERE NOT EXISTS (
 -- EXPECTED: 0
 
 
--- ============================================================
+---------------------------------------------------------------
 -- SUMMARY: ROW COUNTS ACROSS ALL LAYERS
--- ============================================================
-SELECT 'SA_DOMESTIC.SRC_DOMESTIC_SALES'      AS layer_table, COUNT(*) AS row_count FROM sa_domestic.src_domestic_sales
+---------------------------------------------------------------
+SELECT 
+    'SA_DOMESTIC.SRC_DOMESTIC_SALES' AS layer_table, 
+    COUNT(*) AS row_count 
+FROM sa_domestic.src_domestic_sales
 UNION ALL
-SELECT 'SA_INTERNATIONAL.SRC_INTERNATIONAL_SALES', COUNT(*) FROM sa_international.src_international_sales
+SELECT 
+    'SA_INTERNATIONAL.SRC_INTERNATIONAL_SALES', 
+    COUNT(*) 
+FROM sa_international.src_international_sales
 UNION ALL
-SELECT 'BL_3NF.CE_PRODUCTS',                 COUNT(*) FROM bl_3nf.ce_products
+SELECT 
+    'BL_3NF.CE_PRODUCTS', 
+    COUNT(*) 
+FROM bl_3nf.ce_products
 UNION ALL
-SELECT 'BL_3NF.CE_CUSTOMERS_SCD',            COUNT(*) FROM bl_3nf.ce_customers_scd
+SELECT 
+    'BL_3NF.CE_CUSTOMERS_SCD', 
+    COUNT(*) 
+FROM bl_3nf.ce_customers_scd
 UNION ALL
-SELECT 'BL_3NF.CE_CITIES',                   COUNT(*) FROM bl_3nf.ce_cities
+SELECT 
+    'BL_3NF.CE_CITIES', 
+    COUNT(*) 
+FROM bl_3nf.ce_cities
 UNION ALL
-SELECT 'BL_3NF.CE_EMPLOYEES',                COUNT(*) FROM bl_3nf.ce_employees
+SELECT 
+    'BL_3NF.CE_EMPLOYEES', 
+    COUNT(*) 
+FROM bl_3nf.ce_employees
 UNION ALL
-SELECT 'BL_3NF.CE_SALES',                    COUNT(*) FROM bl_3nf.ce_sales
+SELECT 
+    'BL_3NF.CE_SALES', 
+    COUNT(*) 
+FROM bl_3nf.ce_sales
 UNION ALL
-SELECT 'BL_DM.DIM_PRODUCTS',                 COUNT(*) FROM bl_dm.dim_products
+SELECT 
+    'BL_DM.DIM_PRODUCTS', 
+    COUNT(*) 
+FROM bl_dm.dim_products
 UNION ALL
-SELECT 'BL_DM.DIM_CUSTOMERS_SCD',            COUNT(*) FROM bl_dm.dim_customers_scd
+SELECT 
+    'BL_DM.DIM_CUSTOMERS_SCD', 
+    COUNT(*) 
+FROM bl_dm.dim_customers_scd
 UNION ALL
-SELECT 'BL_DM.DIM_GEOGRAPHY',                COUNT(*) FROM bl_dm.dim_geography
+SELECT 
+    'BL_DM.DIM_GEOGRAPHY', 
+    COUNT(*) 
+FROM bl_dm.dim_geography
 UNION ALL
-SELECT 'BL_DM.DIM_EMPLOYEES',                COUNT(*) FROM bl_dm.dim_employees
+SELECT 
+    'BL_DM.DIM_EMPLOYEES', 
+    COUNT(*) 
+FROM bl_dm.dim_employees
 UNION ALL
-SELECT 'BL_DM.DIM_ORDER_ATTRIBUTES',         COUNT(*) FROM bl_dm.dim_order_attributes
+SELECT 
+    'BL_DM.DIM_ORDER_ATTRIBUTES', 
+    COUNT(*) 
+FROM bl_dm.dim_order_attributes
 UNION ALL
-SELECT 'BL_DM.FCT_SALES_DD',                 COUNT(*) FROM bl_dm.fct_sales_dd
+SELECT 
+    'BL_DM.FCT_SALES_DD', 
+    COUNT(*) 
+FROM bl_dm.fct_sales_dd
 ORDER BY layer_table;
+
+
+-- Step 1: Pick one customer to use for the demo
+-- Copy the customer_src_id from the result, you'll use it below
+SELECT customer_src_id, customer_name, customer_segment, 
+       start_dt, end_dt, is_active
+FROM bl_3nf.ce_customers_scd
+WHERE customer_segment = 'Consumer'
+  AND is_active = 'Y'
+  AND customer_id != -1
+ORDER BY customer_src_id
+LIMIT 1;
+
+
+-- Show the same customer in DIM layer
+SELECT customer_surr_id, customer_src_id, customer_name,
+       customer_segment, start_dt, end_dt, is_active
+FROM bl_dm.dim_customers_scd
+WHERE customer_src_id = 'DOM-AA-103754'  -- replace with whatever you got above
+  AND is_active = 'Y';
+
+
+-- Step 2: Change segment from Consumer to Corporate in the source table
+-- This simulates what would arrive in a new CSV file
+UPDATE sa_domestic.src_domestic_sales
+SET segment = 'Corporate'
+WHERE customer_id = 'DOM-AA-103754';  -- same customer_src_id
+
+-- Confirm the update hit rows
+SELECT customer_id, segment 
+FROM sa_domestic.src_domestic_sales
+WHERE customer_id = 'DOM-AA-103754'
+LIMIT 3;
+
+-- Step 3: Run the 3NF SCD2 procedure
+CALL bl_cl.prc_load_customers_scd();
+
+-- Now query this customer in CE_CUSTOMERS_SCD
+-- Expected: 2 rows — one expired, one active
+SELECT customer_id, customer_src_id, customer_name,
+       customer_segment, start_dt, end_dt, is_active, update_dt
+FROM bl_3nf.ce_customers_scd
+WHERE customer_src_id = 'DOM-AA-103754'
+ORDER BY start_dt;
+
+-- Step 4: check the log
+SELECT procedure_name, rows_affected, status, log_message, log_dt
+FROM bl_cl.mta_load_log
+WHERE procedure_name IN (
+    'bl_cl.prc_load_customers_scd',
+    'bl_cl.prc_load_dim_customers_scd'
+)
+ORDER BY log_dt DESC
+LIMIT 6;

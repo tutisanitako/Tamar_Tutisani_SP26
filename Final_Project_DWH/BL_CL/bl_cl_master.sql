@@ -17,13 +17,16 @@ DECLARE
 BEGIN
     RAISE NOTICE '% started at %', v_proc, NOW();
 
-    -- Step 1: Load all 3NF dimensions (product, geography, customer, employee, order attrs)
+    -- Step 0: Load SA staging (EXT_ -> SRC_)
+    CALL bl_cl.prc_load_all_src();
+
+    -- Step 1: Load all 3NF dimensions
     CALL bl_cl.prc_load_all_3nf();
 
-    -- Step 2: Load all DM dimensions (denormalize from 3NF into flat DIM_ tables)
+    -- Step 2: Load all DM dimensions
     CALL bl_cl.prc_load_all_dm_dims();
 
-    -- Step 3: Load fact tables (incremental CE_SALES, rolling-window FCT_SALES_DD)
+    -- Step 3: Load fact tables
     CALL bl_cl.prc_load_all_facts();
 
     CALL bl_cl.prc_log(v_proc, 0, 'SUCCESS',
@@ -37,7 +40,6 @@ EXCEPTION WHEN OTHERS THEN
     RAISE;
 END;
 $$;
-
 
 -- Execute the full pipeline
 CALL bl_cl.prc_run_all();

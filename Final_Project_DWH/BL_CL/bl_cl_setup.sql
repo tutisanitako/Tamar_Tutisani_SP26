@@ -7,7 +7,18 @@
 
 -- STEP 0: Create BL_CL schema
 -----------------------------------------------------------------------------
+-- Create all schemas first so grants do not fail
+CREATE SCHEMA IF NOT EXISTS sa_domestic;
+CREATE SCHEMA IF NOT EXISTS sa_international;
+CREATE SCHEMA IF NOT EXISTS bl_3nf;
+CREATE SCHEMA IF NOT EXISTS bl_dm;
 CREATE SCHEMA IF NOT EXISTS bl_cl;
+
+--DROP SCHEMA IF EXISTS sa_domestic CASCADE;
+--DROP SCHEMA IF EXISTS sa_international CASCADE;
+--DROP SCHEMA IF EXISTS bl_3nf CASCADE;
+--DROP SCHEMA IF EXISTS bl_dm CASCADE;
+--DROP SCHEMA IF EXISTS bl_cl CASCADE;
 
 -- STEP 1: Create the dedicated ETL role
 -- This role is used by the ETL procedures in BL_CL to read from SA and

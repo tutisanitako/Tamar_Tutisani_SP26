@@ -65,7 +65,7 @@ CREATE FOREIGN TABLE sa_domestic.ext_domestic_sales (
 )
 SERVER sa_file_server
 OPTIONS (
-    filename 'SRC_DOMESTIC_SALES.csv',
+    filename 'SRC_DOMESTIC_SALES_5PCT.csv',
     format 'csv',
     header 'true',
     delimiter ',',
@@ -103,7 +103,7 @@ CREATE FOREIGN TABLE sa_international.ext_international_sales (
 )
 SERVER sa_file_server
 OPTIONS (
-    filename 'SRC_INTERNATIONAL_SALES.csv',
+    filename 'SRC_INTERNATIONAL_SALES_5PCT.csv',
     format 'csv',
     header 'true',
     delimiter ',',
@@ -175,126 +175,209 @@ CREATE TABLE IF NOT EXISTS sa_international.src_international_sales (
     employee_id VARCHAR(50)
 );
 
--- STEP 4: Load deduplicated data from EXT_ into SRC_ tables
--- Deduplication key: order_id + product_id + customer_id + order_date
--- Only first occurrence kept using ROW_NUMBER() window function.
--- WHERE NOT EXISTS ensures idempotency: safe to re-run without duplicates.
+-- STEP 4: Incremental load procedures EXT_ -> SRC_
+-- These procedures are called both for the initial load and for every
+-- subsequent incremental load (i.e. when the CSV on disk is replaced with
+-- a new file containing new rows).
+--
+-- HOW INCREMENTAL LOAD WORKS AT THE SA LAYER:
+--   - EXT_ is a foreign table: it always reads whatever CSV is on disk right now.
+--   - SRC_ is a regular PostgreSQL table that accumulates rows across all loads.
+--   - The WHERE NOT EXISTS guard (keyed on order_id + product_id + customer_id
+--     + order_date) ensures rows already in SRC_ are never inserted again.
+--   - So when you swap the CSV to the 5% increment file and call these
+--     procedures, only the genuinely new order lines (not already in SRC_)
+--     are inserted. Previously loaded rows are skipped automatically.
+--   - Logging and exception blocks satisfy the project requirements.
+--
+-- TO RUN AFTER AN INITIAL LOAD:
+--   Replace the CSV file on disk with the new increment file, then call:
+--   CALL bl_cl.prc_load_src_domestic();
+--   CALL bl_cl.prc_load_src_international();
+--   (or simply CALL bl_cl.prc_load_all_src() to run both at once)
 -----------------------------------------------------------------------------
 
--- Load SA_DOMESTIC.SRC_DOMESTIC_SALES (deduplicated)
-INSERT INTO sa_domestic.src_domestic_sales (
-    row_id, order_id, order_date, ship_date, ship_mode,
-    customer_id, customer_name, segment,
-    country, city, region, market,
-    product_id, product_name, category, sub_category,
-    sales, quantity, discount, profit, shipping_cost, cost,
-    employee_id, employee_name, order_priority
-)
-SELECT
-    row_id,
-    order_id,
-    order_date::DATE,
-    NULLIF(TRIM(ship_date), '')::DATE,
-    NULLIF(TRIM(ship_mode), ''),
-    customer_id,
-    NULLIF(TRIM(customer_name), ''),
-    NULLIF(TRIM(segment), ''),
-    NULLIF(TRIM(country), ''),
-    NULLIF(TRIM(city), ''),
-    NULLIF(TRIM(region), ''),
-    NULLIF(TRIM(market), ''),
-    product_id,
-    NULLIF(TRIM(product_name), ''),
-    NULLIF(TRIM(category), ''),
-    NULLIF(TRIM(sub_category), ''),
-    NULLIF(TRIM(sales), '')::NUMERIC(15,4),
-    NULLIF(TRIM(quantity), '')::INTEGER,
-    NULLIF(TRIM(discount), '')::NUMERIC(5,4),
-    NULLIF(TRIM(profit), '')::NUMERIC(15,4),
-    NULLIF(TRIM(shipping_cost), '')::NUMERIC(15,4),
-    NULLIF(TRIM(cost), '')::NUMERIC(15,4),
-    NULLIF(TRIM(employee_id), ''),
-    NULLIF(TRIM(employee_name), ''),
-    NULLIF(TRIM(order_priority), '')
-FROM (
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_src_domestic()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_src_domestic';
+    v_count INTEGER := 0;
+BEGIN
+    INSERT INTO sa_domestic.src_domestic_sales (
+        row_id, order_id, order_date, ship_date, ship_mode,
+        customer_id, customer_name, segment,
+        country, city, region, market,
+        product_id, product_name, category, sub_category,
+        sales, quantity, discount, profit, shipping_cost, cost,
+        employee_id, employee_name, order_priority
+    )
     SELECT
-        *,
-        ROW_NUMBER() OVER (
-            PARTITION BY order_id, product_id, customer_id, order_date
-            ORDER BY row_id
-        ) AS rn
-    FROM sa_domestic.ext_domestic_sales
-    WHERE order_id IS NOT NULL
-      AND product_id IS NOT NULL
-      AND customer_id IS NOT NULL
-      AND order_date IS NOT NULL
-) deduped
-WHERE rn = 1
-  AND NOT EXISTS (
-      SELECT 1
-      FROM sa_domestic.src_domestic_sales existing
-      WHERE existing.order_id = deduped.order_id
-        AND existing.product_id = deduped.product_id
-        AND existing.customer_id = deduped.customer_id
-        AND existing.order_date = deduped.order_date::DATE
-  );
+        row_id,
+        order_id,
+        order_date::DATE,
+        NULLIF(TRIM(ship_date), '')::DATE,
+        NULLIF(TRIM(ship_mode), ''),
+        customer_id,
+        NULLIF(TRIM(customer_name), ''),
+        NULLIF(TRIM(segment), ''),
+        NULLIF(TRIM(country), ''),
+        NULLIF(TRIM(city), ''),
+        NULLIF(TRIM(region), ''),
+        NULLIF(TRIM(market), ''),
+        product_id,
+        NULLIF(TRIM(product_name), ''),
+        NULLIF(TRIM(category), ''),
+        NULLIF(TRIM(sub_category), ''),
+        NULLIF(TRIM(sales), '')::NUMERIC(15,4),
+        NULLIF(TRIM(quantity), '')::INTEGER,
+        NULLIF(TRIM(discount), '')::NUMERIC(5,4),
+        NULLIF(TRIM(profit), '')::NUMERIC(15,4),
+        NULLIF(TRIM(shipping_cost), '')::NUMERIC(15,4),
+        NULLIF(TRIM(cost), '')::NUMERIC(15,4),
+        NULLIF(TRIM(employee_id), ''),
+        NULLIF(TRIM(employee_name), ''),
+        NULLIF(TRIM(order_priority), '')
+    FROM (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY order_id, product_id, customer_id, order_date
+                ORDER BY row_id
+            ) AS rn
+        FROM sa_domestic.ext_domestic_sales
+        WHERE order_id IS NOT NULL
+          AND product_id IS NOT NULL
+          AND customer_id IS NOT NULL
+          AND order_date IS NOT NULL
+    ) deduped
+    WHERE rn = 1
+      AND NOT EXISTS (
+          SELECT 1
+          FROM sa_domestic.src_domestic_sales existing
+          WHERE existing.order_id = deduped.order_id
+            AND existing.product_id = deduped.product_id
+            AND existing.customer_id = deduped.customer_id
+            AND existing.order_date = deduped.order_date::DATE
+      );
 
--- Load SA_INTERNATIONAL.SRC_INTERNATIONAL_SALES (deduplicated)
-INSERT INTO sa_international.src_international_sales (
-    row_id, order_id, order_date, ship_date,
-    customer_id, customer_name, segment,
-    country, state, city, region, market,
-    product_id, product_name, category, sub_category,
-    sales, quantity, discount, profit, shipping_cost, cost,
-    employee_id
-)
-SELECT
-    row_id,
-    order_id,
-    order_date::DATE,
-    NULLIF(TRIM(ship_date), '')::DATE,
-    customer_id,
-    NULLIF(TRIM(customer_name), ''),
-    NULLIF(TRIM(segment), ''),
-    NULLIF(TRIM(country), ''),
-    NULLIF(TRIM(state), ''),
-    NULLIF(TRIM(city), ''),
-    NULLIF(TRIM(region), ''),
-    NULLIF(TRIM(market), ''),
-    product_id,
-    NULLIF(TRIM(product_name), ''),
-    NULLIF(TRIM(category), ''),
-    NULLIF(TRIM(sub_category), ''),
-    NULLIF(TRIM(sales), '')::NUMERIC(15,4),
-    NULLIF(TRIM(quantity), '')::INTEGER,
-    NULLIF(TRIM(discount), '')::NUMERIC(5,4),
-    NULLIF(TRIM(profit), '')::NUMERIC(15,4),
-    NULLIF(TRIM(shipping_cost), '')::NUMERIC(15,4),
-    NULLIF(TRIM(cost), '')::NUMERIC(15,4),
-    NULLIF(TRIM(employee_id), '')
-FROM (
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into sa_domestic.src_domestic_sales');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_src_international()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc  CONSTANT VARCHAR := 'bl_cl.prc_load_src_international';
+    v_count INTEGER := 0;
+BEGIN
+    INSERT INTO sa_international.src_international_sales (
+        row_id, order_id, order_date, ship_date,
+        customer_id, customer_name, segment,
+        country, state, city, region, market,
+        product_id, product_name, category, sub_category,
+        sales, quantity, discount, profit, shipping_cost, cost,
+        employee_id
+    )
     SELECT
-        *,
-        ROW_NUMBER() OVER (
-            PARTITION BY order_id, product_id, customer_id, order_date
-            ORDER BY row_id
-        ) AS rn
-    FROM sa_international.ext_international_sales
-    WHERE order_id IS NOT NULL
-      AND product_id IS NOT NULL
-      AND customer_id IS NOT NULL
-      AND order_date IS NOT NULL
-) deduped
-WHERE rn = 1
-  AND NOT EXISTS (
-      SELECT 1
-      FROM sa_international.src_international_sales existing
-      WHERE existing.order_id = deduped.order_id
-        AND existing.product_id = deduped.product_id
-        AND existing.customer_id = deduped.customer_id
-        AND existing.order_date = deduped.order_date::DATE
-  );
+        row_id,
+        order_id,
+        order_date::DATE,
+        NULLIF(TRIM(ship_date), '')::DATE,
+        customer_id,
+        NULLIF(TRIM(customer_name), ''),
+        NULLIF(TRIM(segment), ''),
+        NULLIF(TRIM(country), ''),
+        NULLIF(TRIM(state), ''),
+        NULLIF(TRIM(city), ''),
+        NULLIF(TRIM(region), ''),
+        NULLIF(TRIM(market), ''),
+        product_id,
+        NULLIF(TRIM(product_name), ''),
+        NULLIF(TRIM(category), ''),
+        NULLIF(TRIM(sub_category), ''),
+        NULLIF(TRIM(sales), '')::NUMERIC(15,4),
+        NULLIF(TRIM(quantity), '')::INTEGER,
+        NULLIF(TRIM(discount), '')::NUMERIC(5,4),
+        NULLIF(TRIM(profit), '')::NUMERIC(15,4),
+        NULLIF(TRIM(shipping_cost), '')::NUMERIC(15,4),
+        NULLIF(TRIM(cost), '')::NUMERIC(15,4),
+        NULLIF(TRIM(employee_id), '')
+    FROM (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY order_id, product_id, customer_id, order_date
+                ORDER BY row_id
+            ) AS rn
+        FROM sa_international.ext_international_sales
+        WHERE order_id IS NOT NULL
+          AND product_id IS NOT NULL
+          AND customer_id IS NOT NULL
+          AND order_date IS NOT NULL
+    ) deduped
+    WHERE rn = 1
+      AND NOT EXISTS (
+          SELECT 1
+          FROM sa_international.src_international_sales existing
+          WHERE existing.order_id = deduped.order_id
+            AND existing.product_id = deduped.product_id
+            AND existing.customer_id = deduped.customer_id
+            AND existing.order_date = deduped.order_date::DATE
+      );
 
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    CALL bl_cl.prc_log(v_proc, v_count, 'SUCCESS',
+        'Loaded ' || v_count || ' new rows into sa_international.src_international_sales');
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SQLERRM: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- Master SA load procedure, calls both sources in sequence
+CREATE OR REPLACE PROCEDURE bl_cl.prc_load_all_src()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_proc CONSTANT VARCHAR := 'bl_cl.prc_load_all_src';
+BEGIN
+    RAISE NOTICE '% started at %', v_proc, NOW();
+
+    CALL bl_cl.prc_load_src_domestic();
+    CALL bl_cl.prc_load_src_international();
+
+    CALL bl_cl.prc_log(v_proc, 0, 'SUCCESS',
+        'All SA source tables loaded successfully');
+
+    RAISE NOTICE '% finished at %', v_proc, NOW();
+
+EXCEPTION WHEN OTHERS THEN
+    CALL bl_cl.prc_log(v_proc, 0, 'ERROR',
+        'SA master load failed: ' || SQLERRM || ' | SQLSTATE: ' || SQLSTATE);
+    RAISE;
+END;
+$$;
+
+
+-- STEP 4a: Initial load, call the procedures immediately for the first time
+-----------------------------------------------------------------------------
+CALL bl_cl.prc_load_all_src();
+--10868
 -- STEP 5: Verification queries
 -----------------------------------------------------------------------------
 

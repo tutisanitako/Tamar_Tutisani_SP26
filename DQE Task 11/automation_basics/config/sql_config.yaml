@@ -1,0 +1,28 @@
+smoke_tests:
+  - name: dwh_clients table exists
+    sql: SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dwh' AND TABLE_NAME = 'dwh_clients'
+    expected: 1
+  - name: dwh_sales table exists
+    sql: SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dwh' AND TABLE_NAME = 'dwh_sales'
+    expected: 1
+  - name: dm_main_dashboard table exists
+    sql: SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dm' AND TABLE_NAME = 'dm_main_dashboard'
+    expected: 1
+
+critical_tests:
+  - name: dwh_clients has no duplicate client_src_id
+    sql: >
+      SELECT COUNT(*) FROM (
+        SELECT client_src_id FROM dwh.dwh_clients
+        GROUP BY client_src_id HAVING COUNT(*) > 1
+      ) dup
+    expected: 0
+  - name: dwh_sales has no orphan client_id (FK integrity)
+    sql: >
+      SELECT COUNT(*) FROM dwh.dwh_sales s
+      LEFT JOIN dwh.dwh_clients c ON s.client_id = c.client_id
+      WHERE c.client_id IS NULL
+    expected: 0
+  - name: dwh_clients IS_VALID contains only allowed values
+    sql: SELECT COUNT(*) FROM dwh.dwh_clients WHERE is_valid NOT IN ('Y', 'N')
+    expected: 0

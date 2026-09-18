@@ -1,0 +1,21 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Pytest cache
+.pytest_cache/
+
+# Allure raw result data (keep only the generated HTML reports, not the intermediate JSON)
+allure-results/
+
+# IDE
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db

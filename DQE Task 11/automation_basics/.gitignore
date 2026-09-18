@@ -10,7 +10,7 @@ __pycache__/
 # Pytest cache
 .pytest_cache/
 
-# Allure raw result data (keep only the generated HTML reports, not the intermediate JSON)
+# Allure raw result data
 allure-results/
 
 # IDE

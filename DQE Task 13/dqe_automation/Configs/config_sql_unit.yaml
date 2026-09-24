@@ -1,0 +1,39 @@
+database:
+  host: localhost
+  port: 5432
+  dbname: dwh_hw_db
+  user: postgres
+  password: 120823
+
+tests:
+  # ---- SMOKE: object presence only (cheap, fast, run after every build) ----
+  - name: smoke_channels_table_exists
+    mark: smoke
+    sql: "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'lnd' AND table_name = 'lnd_s1_channels'"
+    expected: 1
+
+  - name: smoke_reconciliation_results_table_exists
+    mark: smoke
+    sql: "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'lnd' AND table_name = 'reconciliation_results'"
+    expected: 1
+
+  - name: smoke_dwh_schema_exists
+    mark: smoke
+    sql: "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'dwh'"
+    expected: 1
+
+  # ---- CRITICAL PATH: data-level checks on the same objects ----
+  - name: critical_channels_no_null_business_key
+    mark: critical
+    sql: "SELECT COUNT(*) FROM lnd.lnd_s1_channels WHERE channel_id IS NULL"
+    expected: 0
+
+  - name: critical_channels_no_duplicate_business_key
+    mark: critical
+    sql: "SELECT COUNT(*) FROM (SELECT channel_id FROM lnd.lnd_s1_channels GROUP BY channel_id HAVING COUNT(*) > 1) dup"
+    expected: 0
+
+  - name: critical_reconciliation_results_table_populated
+    mark: critical
+    sql: "SELECT COUNT(*) FROM lnd.reconciliation_results WHERE reconciliation_status LIKE 'Mismatch%'"
+    expected: 8

@@ -1,0 +1,5 @@
+global:
+    # The showcase we need for Task 2 (playground.powerbi.com -> showcases-gallery -> capture-report-views)
+    report_uri: https://playground.powerbi.com/en-us/showcases-gallery/capture-report-views
+    delay: 30
+    browser: chrome

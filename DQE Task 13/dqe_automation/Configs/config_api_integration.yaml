@@ -1,0 +1,4 @@
+global:
+  jsonplaceholder_base_url: https://jsonplaceholder.typicode.com
+  target_user_id: 3
+  expected_post_count: 10
